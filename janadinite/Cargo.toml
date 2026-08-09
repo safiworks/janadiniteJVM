@@ -1,0 +1,9 @@
+[package]
+name = "janadinite"
+version = "0.1.0"
+edition = "2024"
+authors = ["safiworks safiworks0@gmail.com"]
+license = "MIT"
+description = "A rust JVM decoding and encoding library + JNI native functions"
+
+[dependencies]

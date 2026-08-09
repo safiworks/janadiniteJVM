@@ -1,0 +1,9 @@
+[package]
+name = "vanadinite-jvm"
+version = "0.1.0"
+edition = "2024"
+authors = ["safiworks safiworks0@gmail.com"]
+license = "MIT"
+description = "A JIT powered JVM and JVM library wrote in rust"
+
+[dependencies]
