@@ -32,13 +32,13 @@ pub enum OpCode {
     /// The const is an immediate signed byte. The local variable at index must contain an int. The value const is first sign-extended to an int, and then the local variable at index is incremented by that amount.
     Iinc(u8, i8) = 0x84,
     /// Branch always/
-    Goto(u16) = 0xa7,
+    Goto(i16) = 0xa7,
     /// Branch if int comparison succeeds.
     ///
     /// Both value1 and value2 must be of type int. They are both popped from the operand stack and compared. All comparisons are signed. The results of the comparison are as follows:
     ///
     /// if_icmpeq succeeds if and only if value1 = value2
-    IfIcmpEq(u16) = 0x9f,
+    IfIcmpEq(i16) = 0x9f,
 
     /// Return int from method.
     ///
@@ -120,11 +120,11 @@ impl<'a> Instructions<'a> {
             }
             0x84 => Some(OpCode::Iinc(opnd!(u8), opnd!(u8) as i8)),
             0x9f => {
-                let pc = opnd!(u16);
+                let pc = opnd!(u16) as i16;
                 Some(OpCode::IfIcmpEq(pc))
             }
             0xa7 => {
-                let pc = opnd!(u16);
+                let pc = opnd!(u16) as i16;
                 Some(OpCode::Goto(pc))
             }
             0xac => Some(OpCode::IReturn),
