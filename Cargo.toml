@@ -1,9 +1,13 @@
 [package]
-name = "vanadinite-jvm"
+name = "janadinite-vm"
 version = "0.1.0"
 edition = "2024"
 authors = ["safiworks safiworks0@gmail.com"]
 license = "MIT"
 description = "A JIT powered JVM and JVM library wrote in rust"
 
+[workspace]
+members = ["janadinite"]
+
 [dependencies]
+janadinite = { path = "janadinite" }

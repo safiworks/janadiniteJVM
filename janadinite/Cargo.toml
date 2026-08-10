@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 authors = ["safiworks safiworks0@gmail.com"]
 license = "MIT"
-description = "A rust JVM decoding and encoding library + JNI native functions"
+description = "A no-std rust JVM decoding and encoding library + JNI native functions"
 
 [dependencies]
+simd_cesu8 = { version = "1.2.0", default-features = false }
+
+[features]
+std = []
+default = ["std"]

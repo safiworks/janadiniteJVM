@@ -1,0 +1,440 @@
+mod constant_pool;
+mod raw;
+
+use crate::io;
+
+pub use constant_pool::*;
+pub use raw::*;
+
+extern crate alloc;
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+
+use crate::io::{ClassByteReader, ClassDecode, ClassReader};
+
+/// Describes all (implemented) JVM instructions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum OpCode {
+    /// Load int from local variable
+    ///
+    /// The index is an unsigned byte that must be an index into the local variable array of the current frame (§2.6). The local variable at index must contain an int. The value of the local variable at index is pushed onto the operand stack.
+    Iload(u8) = 0x15,
+    /// Store int into local variable
+    ///
+    /// The index is an unsigned byte that must be an index into the local variable array of the current frame (§2.6). The value on the top of the operand stack must be of type int. It is popped from the operand stack, and the value of the local variable at index is set to value.
+    IStore(u8) = 0x36,
+    /// Push Byte. The immediate byte is sign-extended to an int value. That value is pushed onto the operand stack.
+    Bipush(i8) = 0x10,
+    /// Increment local variable by constant.
+    /// The index is an unsigned byte that must be an index into the local variable array of the current frame (§2.6).
+    ///
+    /// The const is an immediate signed byte. The local variable at index must contain an int. The value const is first sign-extended to an int, and then the local variable at index is incremented by that amount.
+    Iinc(u8, i8) = 0x84,
+    /// Branch always/
+    Goto(u16) = 0xa7,
+    /// Branch if int comparison succeeds.
+    ///
+    /// Both value1 and value2 must be of type int. They are both popped from the operand stack and compared. All comparisons are signed. The results of the comparison are as follows:
+    ///
+    /// if_icmpeq succeeds if and only if value1 = value2
+    IfIcmpEq(u16) = 0x9f,
+
+    /// Return int from method.
+    ///
+    ///  The current method must have return type boolean, byte, short, char, or int. The value must be of type int. If the current method is a synchronized method, the monitor entered or reentered on invocation of the method is updated and possibly exited as if by execution of a monitorexit instruction (§monitorexit) in the current thread. If no exception is thrown, value is popped from the operand stack of the current frame (§2.6) and pushed onto the operand stack of the frame of the invoker. Any other values on the operand stack of the current method are discarded.
+    IReturn = 0xac,
+    Invalid(u8),
+}
+
+macro_rules! invalid_data {
+    ($msg:expr) => {
+        io::Error::new_static(io::ErrorKind::InvalidData, $msg)
+    };
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Instructions<'a> {
+    bytes: &'a [u8],
+    pc: u16,
+}
+
+impl<'a> Instructions<'a> {
+    pub const fn pc(&self) -> u16 {
+        self.pc
+    }
+
+    pub const fn set_pc(&mut self, pc: u16) {
+        self.pc = pc;
+    }
+
+    pub const fn raw_code(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    pub fn next_op(&mut self) -> Option<OpCode> {
+        if self.pc() as usize >= self.bytes.len() {
+            return None;
+        }
+
+        let mut reader = ClassByteReader::new(&self.bytes[self.pc() as usize..]);
+        let op = reader.read_u8().ok()?;
+        self.pc += 1;
+
+        macro_rules! opnd {
+            ($t: ty) => {{
+                let Ok(opr): Result<$t, _> = reader.decode() else {
+                    return Some(OpCode::Invalid(op));
+                };
+
+                self.pc += size_of::<$t>() as u16;
+                opr
+            }};
+        }
+
+        match op {
+            0x10 => {
+                let byte = opnd!(u8) as i8;
+                Some(OpCode::Bipush(byte))
+            }
+            // TODO: Too lazy for iconst<n>
+            0x2 => Some(OpCode::Bipush(-1)),
+            0x3..=0x8 => Some(OpCode::Bipush((op - 0x3) as i8)),
+            0x15 => {
+                let idx = opnd!(u8);
+                Some(OpCode::Iload(idx))
+            }
+            0x1a | 0x1b | 0x1c | 0x1d => {
+                // TODO: too lazy to do iload<n>
+                let idx = op - 0x1a;
+                Some(OpCode::Iload(idx))
+            }
+            0x36 => {
+                let idx = opnd!(u8);
+                Some(OpCode::IStore(idx))
+            }
+            0x3b | 0x3c | 0x3d | 0x3e => {
+                let idx = op - 0x3b;
+                // TODO: too lazy to do istore<n>
+                Some(OpCode::IStore(idx))
+            }
+            0x84 => Some(OpCode::Iinc(opnd!(u8), opnd!(u8) as i8)),
+            0x9f => {
+                let pc = opnd!(u16);
+                Some(OpCode::IfIcmpEq(pc))
+            }
+            0xa7 => {
+                let pc = opnd!(u16);
+                Some(OpCode::Goto(pc))
+            }
+            0xac => Some(OpCode::IReturn),
+            _ => Some(OpCode::Invalid(op)),
+        }
+    }
+}
+
+impl<'a> Iterator for Instructions<'a> {
+    type Item = OpCode;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_op()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct JVMCode {
+    max_locals: u16,
+    max_stack: u16,
+    code: Box<[u8]>,
+    exception_table: Box<[ExceptionTableEntry]>,
+    attributes: Box<[JVMAttribute]>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ExceptionTableEntry {
+    pub start_pc: u16,
+    pub end_pc: u16,
+    pub handler_pc: u16,
+    pub catch_type: u16,
+}
+
+impl ClassDecode for ExceptionTableEntry {
+    fn decode_from<R: ClassReader + ?Sized>(reader: &mut R) -> crate::io::Result<Self> {
+        let start_pc = reader.read_u16()?;
+        let end_pc = reader.read_u16()?;
+        let handler_pc = reader.read_u16()?;
+        let catch_type = reader.read_u16()?;
+
+        Ok(Self {
+            start_pc,
+            end_pc,
+            handler_pc,
+            catch_type,
+        })
+    }
+}
+
+impl JVMCode {
+    pub const fn max_locals(&self) -> u16 {
+        self.max_locals
+    }
+
+    pub const fn max_stack(&self) -> u16 {
+        self.max_stack
+    }
+
+    pub const fn code(&self) -> &[u8] {
+        &self.code
+    }
+
+    pub const fn attributes(&self) -> &[JVMAttribute] {
+        &self.attributes
+    }
+
+    pub const fn exception_table(&self) -> &[ExceptionTableEntry] {
+        &self.exception_table
+    }
+
+    pub const fn instructions<'s>(&'s self) -> Instructions<'s> {
+        Instructions {
+            bytes: self.code(),
+            pc: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum JVMAttribute {
+    Code(JVMCode),
+    Unknown(Arc<str>, Box<[u8]>),
+}
+
+// Macro abuse yay!
+//
+// TODO: Maybe have a ConstantPool abstraction??
+macro_rules! get_const {
+    ($variant: ident { $pat:tt }, $pool: expr, $idx:expr, $target_name: literal) => {{
+        let Some(ConstantPoolEntry::$variant { $pat }) = $pool.get($idx as usize) else {
+            return Err(invalid_data!(concat!(
+                $target_name,
+                " expected ",
+                stringify!($variant),
+                " at a valid index in the constant pool"
+            )));
+        };
+        { $pat }
+    }};
+    (UTF8 $pool: expr, $idx: expr, $target_name: literal) => {
+        get_const!(Utf8 { string }, $pool, $idx, $target_name)
+    };
+}
+
+impl JVMAttribute {
+    pub fn parse(attr: AttributeInfo, constant_pool: &[ConstantPoolEntry]) -> io::Result<Self> {
+        let name = get_const!(
+            UTF8
+            constant_pool,
+            attr.attribute_name_index,
+            "Attribute name"
+        );
+
+        let mut reader = ClassByteReader::new(&attr.info);
+        match &**name {
+            "Code" => {
+                let max_stack = reader.read_u16()?;
+                let max_locals = reader.read_u16()?;
+
+                let code_length = reader.read_u32()?;
+                let code = reader.decode_n(code_length as usize)?.into_boxed_slice();
+
+                let exception_table_length = reader.read_u16()?;
+                let exception_table = reader
+                    .decode_n(exception_table_length as usize)?
+                    .into_boxed_slice();
+
+                let attributes_count = reader.read_u16()?;
+                let mut attributes = Vec::with_capacity(attributes_count as usize);
+                for _ in 0..attributes_count {
+                    let raw_attr: AttributeInfo = reader.decode()?;
+
+                    attributes.push(JVMAttribute::parse(raw_attr, constant_pool)?);
+                }
+
+                Ok(Self::Code(JVMCode {
+                    max_locals,
+                    max_stack,
+                    code,
+                    attributes: attributes.into_boxed_slice(),
+                    exception_table,
+                }))
+            }
+            _ => Ok(Self::Unknown(name.clone(), attr.info)),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct JVMMethod {
+    name: Arc<str>,
+    descriptor: Arc<str>,
+    access_flags: u16,
+    code: Option<JVMCode>,
+    attributes: Box<[JVMAttribute]>,
+}
+
+impl JVMMethod {
+    pub fn name(&self) -> &str {
+        &*self.name
+    }
+
+    pub fn descriptor(&self) -> &str {
+        &*self.descriptor
+    }
+
+    pub const fn access_flags(&self) -> u16 {
+        self.access_flags
+    }
+    pub const fn code(&self) -> Option<&JVMCode> {
+        self.code.as_ref()
+    }
+
+    pub const fn attributes(&self) -> &[JVMAttribute] {
+        &self.attributes
+    }
+
+    pub fn parse(info: MethodInfo, constant_pool: &[ConstantPoolEntry]) -> io::Result<Self> {
+        let name = get_const!(
+            UTF8
+            constant_pool,
+            info.name_index,
+            "Method name"
+        );
+        let descriptor = get_const!(
+            UTF8
+            constant_pool,
+            info.descriptor_index,
+            "Method descriptor"
+        );
+
+        let mut code = None;
+        let mut attributes = Vec::with_capacity(info.attributes.len().saturating_sub(1));
+
+        for attr in info.attributes {
+            let parsed = JVMAttribute::parse(attr, constant_pool)?;
+
+            if let JVMAttribute::Code(attr_code) = parsed {
+                if info.access_flags & ACC_ABSTRACT != 0 || info.access_flags & ACC_NATIVE != 0 {
+                    return Err(invalid_data!(
+                        "Native and abstract methods must not have code"
+                    ));
+                }
+                if code.is_some() {
+                    return Err(invalid_data!("More the one code attribute in method"));
+                }
+                code = Some(attr_code);
+            } else {
+                attributes.push(parsed);
+            }
+        }
+
+        Ok(Self {
+            access_flags: info.access_flags,
+            name: name.clone(),
+            descriptor: descriptor.clone(),
+            code,
+            attributes: attributes.into_boxed_slice(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Class {
+    this_name: Arc<str>,
+    super_name: Arc<str>,
+    minor_version: u16,
+    major_version: u16,
+    access_flags: u16,
+    constant_pool: Box<[ConstantPoolEntry]>,
+    methods: Box<[JVMMethod]>,
+    attributes: Box<[JVMAttribute]>,
+}
+
+impl Class {
+    /// Decodes and parses a class from a given reader.
+    pub fn decode(reader: &mut impl ClassReader) -> io::Result<Self> {
+        let raw_class: RawClassFile = reader.decode()?;
+        Self::parse(raw_class)
+    }
+
+    /// Version as (major, minor)
+    pub const fn version(&self) -> (u16, u16) {
+        (self.major_version, self.minor_version)
+    }
+
+    pub fn name(&self) -> &str {
+        &self.this_name
+    }
+
+    pub fn super_name(&self) -> &str {
+        &self.super_name
+    }
+
+    pub const fn access_flags(&self) -> u16 {
+        self.access_flags
+    }
+
+    pub const fn methods(&self) -> &[JVMMethod] {
+        &self.methods
+    }
+
+    pub const fn constant_pool(&self) -> &[ConstantPoolEntry] {
+        &self.constant_pool
+    }
+
+    pub const fn attributes(&self) -> &[JVMAttribute] {
+        &self.attributes
+    }
+
+    pub fn parse(raw: RawClassFile) -> io::Result<Self> {
+        let constant_pool = raw.constant_pool;
+
+        let this_index = raw.this_class;
+        let super_index = raw.super_class;
+
+        let this_class = get_const!(
+            Class { name_index },
+            constant_pool,
+            this_index,
+            "this_class"
+        );
+        let super_class = get_const!(
+            Class { name_index },
+            constant_pool,
+            super_index,
+            "super_class"
+        );
+
+        let this_name = get_const!(UTF8 constant_pool, *this_class, "this_class name").clone();
+        let super_name = get_const!(UTF8 constant_pool, *super_class, "super_class name").clone();
+
+        let mut attributes = Vec::with_capacity(raw.attributes.len());
+        for attr in raw.attributes {
+            attributes.push(JVMAttribute::parse(attr, &constant_pool)?);
+        }
+
+        let mut methods = Vec::with_capacity(raw.methods.len());
+        for meth in raw.methods {
+            methods.push(JVMMethod::parse(meth, &constant_pool)?);
+        }
+
+        Ok(Self {
+            this_name,
+            super_name,
+            minor_version: raw.minor_version,
+            major_version: raw.major_version,
+            access_flags: raw.access_flags,
+            constant_pool,
+            methods: methods.into_boxed_slice(),
+            attributes: attributes.into_boxed_slice(),
+        })
+    }
+}
