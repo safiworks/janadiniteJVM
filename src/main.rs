@@ -11,7 +11,7 @@ fn main() {
 
     for meth in class.methods() {
         println!(
-            "{:#x} {} {} {{",
+            "{:?} {} {} {{",
             meth.access_flags(),
             meth.descriptor(),
             meth.name()
