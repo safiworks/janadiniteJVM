@@ -108,6 +108,7 @@ impl VM {
                 resolved,
                 unresolved_class,
                 unresolved_name,
+                unresolved_descriptor,
                 ..
             } => {
                 if let Some((class, method)) = resolved.get() {
@@ -118,7 +119,10 @@ impl VM {
                             class
                                 .methods()
                                 .iter()
-                                .find(|m| (**m).name() == &**unresolved_name)
+                                .find(|m| {
+                                    (**m).name() == &**unresolved_name
+                                        && (**m).raw_descriptor() == &**unresolved_descriptor
+                                })
                                 .map(|m| (class.clone(), m.clone()))
                                 .ok_or_else(|| {
                                     VMError::NoSuchMethodInClass(String::from(&**unresolved_name))
