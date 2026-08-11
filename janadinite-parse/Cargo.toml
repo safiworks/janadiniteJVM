@@ -1,10 +1,10 @@
 [package]
-name = "janadinite"
+name = "janadinite-parse"
 version = "0.1.0"
 edition = "2024"
 authors = ["safiworks safiworks0@gmail.com"]
 license = "MIT"
-description = "A no-std rust JVM decoding and encoding library + JNI native functions"
+description = "A no-std rust JVM decoding and encoding library"
 
 [dependencies]
 bitflags = "2.13.1"

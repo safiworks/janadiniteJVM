@@ -2,6 +2,7 @@ mod constant_pool;
 mod raw;
 
 use crate::io;
+use crate::io::invalid_data;
 
 pub use constant_pool::*;
 pub use raw::*;
@@ -65,6 +66,30 @@ pub enum OpCode {
     ///
     /// The const is an immediate signed byte. The local variable at index must contain an int. The value const is first sign-extended to an int, and then the local variable at index is incremented by that amount.
     Iinc(u8, i8) = 0x84,
+    /// Multiply int.
+    ///
+    ///  Both value1 and value2 must be of type int. The values are popped from the operand stack. The int result is value1 * value2. The result is pushed onto the operand stack.
+    ///
+    /// The result is the 32 low-order bits of the true mathematical result in a sufficiently wide two's-complement format, represented as a value of type int. If overflow occurs, then the sign of the result may not be the same as the sign of the mathematical multiplication of the two values.
+    ///
+    /// Despite the fact that overflow may occur, execution of an imul instruction never throws a run-time exception
+    Imul = 0x68,
+    /// Divide int.
+    ///
+    /// Both value1 and value2 must be of type int. The values are popped from the operand stack. The int result is value1 / value2. The result is pushed onto the operand stack.
+    Idiv = 0x6c,
+    /// Subtract int.
+    ///
+    /// Both value1 and value2 must be of type int. The values are popped from the operand stack. The int result is value1 - value2. The result is pushed onto the operand stack.
+    Isub = 0x64,
+    /// Add int.
+    ///
+    /// Both value1 and value2 must be of type int. The values are popped from the operand stack. The int result is value1 + value2. The result is pushed onto the operand stack.
+    Iadd = 0x60,
+    /// Negate int.
+    ///
+    /// The value must be of type int. It is popped from the operand stack. The int result is -value. The result is pushed onto the operand stack.
+    Ineg = 0x74,
     /// Branch always/
     Goto(i16) = 0xa7,
     /// Branch if int comparison succeeds.
@@ -73,18 +98,26 @@ pub enum OpCode {
     ///
     /// if_icmpeq succeeds if and only if value1 = value2
     IfIcmpEq(i16) = 0x9f,
-
+    /// Branch if int comparison fails.
+    ///
+    /// Both value1 and value2 must be of type int. They are both popped from the operand stack and compared. All comparisons are signed. The results of the comparison are as follows:
+    ///
+    /// if_icmpne succeeds if and only if value1 != value2
+    IfIcmpNe(i16) = 0xa0,
+    /// Branch if int comparison with zero succeeds.
+    /// The value must be of type int. It is popped from the operand stack and compared against zero. All comparisons are signed. The results of the comparisons are as follows:
+    /// - ifne succeeds if and only if value ≠ 0.
+    IfNe(i16) = 0x9a,
+    /// Branch if int comparison with zero fails.
+    /// The value must be of type int. It is popped from the operand stack and compared against zero. All comparisons are signed. The results of the comparisons are as follows:
+    /// - ifeq succeeds if and only if value = 0.
+    IfEq(i16) = 0x99,
     /// Return int from method.
     ///
     ///  The current method must have return type boolean, byte, short, char, or int. The value must be of type int. If the current method is a synchronized method, the monitor entered or reentered on invocation of the method is updated and possibly exited as if by execution of a monitorexit instruction (§monitorexit) in the current thread. If no exception is thrown, value is popped from the operand stack of the current frame (§2.6) and pushed onto the operand stack of the frame of the invoker. Any other values on the operand stack of the current method are discarded.
     IReturn = 0xac,
+    InvokeStatic(u16) = 0xb8,
     Invalid(u8),
-}
-
-macro_rules! invalid_data {
-    ($msg:expr) => {
-        io::Error::new_static(io::ErrorKind::InvalidData, $msg)
-    };
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -153,15 +186,33 @@ impl<'a> Instructions<'a> {
                 Some(OpCode::IStore(idx))
             }
             0x84 => Some(OpCode::Iinc(opnd!(u8), opnd!(u8) as i8)),
+            0x68 => Some(OpCode::Imul),
+            0x6c => Some(OpCode::Idiv),
+            0x74 => Some(OpCode::Ineg),
+            0x64 => Some(OpCode::Isub),
+            0x60 => Some(OpCode::Iadd),
             0x9f => {
                 let pc = opnd!(u16) as i16;
                 Some(OpCode::IfIcmpEq(pc))
+            }
+            0xa0 => {
+                let pc = opnd!(u16) as i16;
+                Some(OpCode::IfIcmpNe(pc))
+            }
+            0x99 => {
+                let pc = opnd!(u16) as i16;
+                Some(OpCode::IfEq(pc))
+            }
+            0x9a => {
+                let pc = opnd!(u16) as i16;
+                Some(OpCode::IfNe(pc))
             }
             0xa7 => {
                 let pc = opnd!(u16) as i16;
                 Some(OpCode::Goto(pc))
             }
             0xac => Some(OpCode::IReturn),
+            0xb8 => Some(OpCode::InvokeStatic(opnd!(u16))),
             _ => Some(OpCode::Invalid(op)),
         }
     }
@@ -242,25 +293,28 @@ pub enum JVMAttribute {
     Unknown(Arc<str>, Box<[u8]>),
 }
 
+#[macro_export]
 // Macro abuse yay!
 //
 // TODO: Maybe have a ConstantPool abstraction??
 macro_rules! get_const {
-    ($variant: ident { $pat:tt }, $pool: expr, $idx:expr, $target_name: literal) => {{
-        let Some(ConstantPoolEntry::$variant { $pat }) = $pool.get($idx as usize) else {
-            return Err(invalid_data!(concat!(
+    ($variant: ident { $($pat:tt)* }, $pool: expr, $idx:expr, $target_name: literal) => {{
+        let Some(ConstantPoolEntry::$variant { $($pat)* }) = $pool.get($idx as usize) else {
+            return Err($crate::invalid_data!(concat!(
                 $target_name,
                 " expected ",
                 stringify!($variant),
                 " at a valid index in the constant pool"
             )));
         };
-        { $pat }
+        { ($($pat)*) }
     }};
     (UTF8 $pool: expr, $idx: expr, $target_name: literal) => {
-        get_const!(Utf8 { string }, $pool, $idx, $target_name)
+        $crate::class::get_const!(Utf8 { string }, $pool, $idx, $target_name)
     };
 }
+
+pub use get_const;
 
 impl JVMAttribute {
     pub fn parse(attr: AttributeInfo, constant_pool: &[ConstantPoolEntry]) -> io::Result<Self> {
@@ -306,13 +360,71 @@ impl JVMAttribute {
     }
 }
 
+#[derive(Debug)]
+pub struct MethodDescriptor<'a> {
+    args: &'a [u8],
+    ret: &'a [u8],
+}
+
+impl<'a> MethodDescriptor<'a> {
+    pub fn new(desc: &'a str) -> Self {
+        let mut split = desc.as_bytes().split(|c| [b'(', b')'].contains(c));
+
+        Self {
+            args: split.nth(1).unwrap_or_default(),
+            ret: split.next().unwrap_or_default(),
+        }
+    }
+
+    pub fn ret(&self) -> &'a [u8] {
+        self.ret
+    }
+
+    pub fn args(&self) -> impl Iterator<Item = &'a [u8]> {
+        let mut data = self.args;
+
+        core::iter::from_fn(move || {
+            if data.is_empty() {
+                return None;
+            }
+
+            let mut i = 0;
+            while data.get(i) == Some(&b'[') {
+                i += 1;
+            }
+
+            let end = match data.get(i)? {
+                b'L' => {
+                    let semi = data[i..].iter().position(|&b| b == b';')?;
+                    i + semi + 1
+                }
+                _ => i + 1,
+            };
+
+            let (item, rest) = data.split_at(end);
+            data = rest;
+            Some(item)
+        })
+    }
+
+    pub fn args_size(&self) -> usize {
+        self.args()
+            .map(|arg| match arg[0] {
+                b'D' | b'J' => 2,
+                _ => 1,
+            })
+            .sum()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct JVMMethod {
-    name: Arc<str>,
-    descriptor: Arc<str>,
-    access_flags: JVMAccessFlag,
-    code: Option<JVMCode>,
-    attributes: Box<[JVMAttribute]>,
+    pub name: Arc<str>,
+    pub descriptor: Arc<str>,
+    pub args_size: usize,
+    pub access_flags: JVMAccessFlag,
+    pub code: Option<JVMCode>,
+    pub attributes: Box<[JVMAttribute]>,
 }
 
 impl JVMMethod {
@@ -320,8 +432,16 @@ impl JVMMethod {
         &*self.name
     }
 
-    pub fn descriptor(&self) -> &str {
+    pub fn raw_descriptor(&self) -> &str {
         &*self.descriptor
+    }
+
+    pub fn descriptor<'s>(&'s self) -> MethodDescriptor<'s> {
+        MethodDescriptor::new(&self.descriptor)
+    }
+
+    pub fn args_size(&self) -> usize {
+        self.args_size
     }
 
     pub const fn access_flags(&self) -> JVMAccessFlag {
@@ -374,26 +494,32 @@ impl JVMMethod {
             }
         }
 
+        let args_size = MethodDescriptor::new(descriptor).args_size();
         Ok(Self {
             access_flags,
             name: name.clone(),
             descriptor: descriptor.clone(),
+            args_size,
             code,
             attributes: attributes.into_boxed_slice(),
         })
     }
 }
 
+/// The difference between this and [`RawClassFile`] is that this is more resolved.
+/// however unlike [`JVMMethod`], and [`JVMAttribute`], this is not fully resolved for example the constant pool is still raw.
+///
+/// FIXME: bad design, it is necessary for this to go into another layer of conversion for it to be usable with the VM, this lib must provide everything it can for parsing while being no_std but how far should it go?
 #[derive(Debug, Clone)]
 pub struct Class {
-    this_name: Arc<str>,
-    super_name: Arc<str>,
-    minor_version: u16,
-    major_version: u16,
-    access_flags: JVMAccessFlag,
-    constant_pool: Box<[ConstantPoolEntry]>,
-    methods: Box<[JVMMethod]>,
-    attributes: Box<[JVMAttribute]>,
+    pub this_name: Arc<str>,
+    pub super_name: Arc<str>,
+    pub minor_version: u16,
+    pub major_version: u16,
+    pub access_flags: JVMAccessFlag,
+    pub constant_pool: Box<[ConstantPoolEntry]>,
+    pub methods: Box<[JVMMethod]>,
+    pub attributes: Box<[JVMAttribute]>,
 }
 
 impl Class {
@@ -408,11 +534,11 @@ impl Class {
         (self.major_version, self.minor_version)
     }
 
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> &Arc<str> {
         &self.this_name
     }
 
-    pub fn super_name(&self) -> &str {
+    pub fn super_name(&self) -> &Arc<str> {
         &self.super_name
     }
 

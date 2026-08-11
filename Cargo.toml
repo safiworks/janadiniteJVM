@@ -7,7 +7,8 @@ license = "MIT"
 description = "A JIT powered JVM and JVM library wrote in rust"
 
 [workspace]
-members = ["janadinite"]
+members = ["janadinite-parse"]
 
 [dependencies]
-janadinite = { path = "janadinite" }
+clap = { version = "4.6.6", features = ["derive"] }
+janadinite-parse = { path = "janadinite-parse" }

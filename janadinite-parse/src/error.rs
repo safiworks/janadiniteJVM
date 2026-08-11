@@ -132,3 +132,12 @@ mod std_impl {
         }
     }
 }
+
+#[macro_export]
+macro_rules! invalid_data {
+    ($msg:expr) => {
+        $crate::io::Error::new_static($crate::io::ErrorKind::InvalidData, $msg)
+    };
+}
+
+pub use invalid_data;

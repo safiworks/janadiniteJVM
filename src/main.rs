@@ -1,29 +1,24 @@
-use std::fs::File;
+use std::path::PathBuf;
+
+use clap::Parser;
+
+use crate::vm::VM;
+
+pub mod vm;
+
+#[derive(clap::Parser, Debug)]
+struct Args {
+    #[arg(long, short)]
+    classpath: PathBuf,
+    main_class: String,
+}
 
 fn main() {
-    let class_path = std::env::args().nth(1).expect("Expected class file");
-    let mut class_file = File::open(class_path).expect("Failed to open class file");
+    let args = Args::parse();
 
-    let class =
-        janadinite::class::Class::decode(&mut class_file).expect("Failed to decode class file");
+    let classpath = args.classpath;
+    let main_class = args.main_class;
 
-    println!("{class:#x?}");
-
-    for meth in class.methods() {
-        println!(
-            "{:?} {} {} {{",
-            meth.access_flags(),
-            meth.descriptor(),
-            meth.name()
-        );
-
-        if let Some(code) = meth.code() {
-            println!("locals={},stack={}", code.max_locals(), code.max_stack());
-            for op in code.instructions() {
-                println!("  {op:?}");
-            }
-        }
-
-        println!("}}");
-    }
+    let vm = VM::open(classpath, &*main_class).expect("Failed to open Class");
+    println!("main() => {:?}", vm.run_main());
 }
