@@ -117,6 +117,27 @@ pub enum OpCode {
     ///  The current method must have return type boolean, byte, short, char, or int. The value must be of type int. If the current method is a synchronized method, the monitor entered or reentered on invocation of the method is updated and possibly exited as if by execution of a monitorexit instruction (§monitorexit) in the current thread. If no exception is thrown, value is popped from the operand stack of the current frame (§2.6) and pushed onto the operand stack of the frame of the invoker. Any other values on the operand stack of the current method are discarded.
     IReturn = 0xac,
     InvokeStatic(u16) = 0xb8,
+    /// Return void from method.
+    Return = 0xb1,
+    /// Get static field from class.
+    /// The unsigned indexbyte1 and indexbyte2 are used to construct an index into the run-time constant pool of the current class (§2.6), where the value of the index is (indexbyte1 << 8) | indexbyte2. The run-time constant pool item at that index must be a symbolic reference to a field (§5.1), which gives the name and descriptor of the field as well as a symbolic reference to the class or interface in which the field is to be found. The referenced field is resolved (§5.4.3.2).
+    ///
+    /// On successful resolution of the field, the class or interface that declared the resolved field is initialized (§5.5) if that class or interface has not already been initialized.
+    ///
+    /// The value of the class or interface field is fetched and pushed onto the operand stack.
+    Getstatic(u16) = 0xb2,
+    /**
+     * Set static field in class
+
+     The unsigned indexbyte1 and indexbyte2 are used to construct an index into the run-time constant pool of the current class (§2.6), where the value of the index is (indexbyte1 << 8) | indexbyte2. The run-time constant pool item at that index must be a symbolic reference to a field (§5.1), which gives the name and descriptor of the field as well as a symbolic reference to the class or interface in which the field is to be found. The referenced field is resolved (§5.4.3.2).
+
+    On successful resolution of the field, the class or interface that declared the resolved field is initialized (§5.5) if that class or interface has not already been initialized.
+
+    The type of a value stored by a putstatic instruction must be compatible with the descriptor of the referenced field (§4.3.2). If the field descriptor type is boolean, byte, char, short, or int, then the value must be an int. If the field descriptor type is float, long, or double, then the value must be a float, long, or double, respectively. If the field descriptor type is a reference type, then the value must be of a type that is assignment compatible (JLS §5.2) with the field descriptor type. If the field is final, it must be declared in the current class, and the instruction must occur in the <clinit> method of the current class (§2.9).
+
+    The value is popped from the operand stack and undergoes value set conversion (§2.8.3), resulting in value'. The class field is set to value
+    */
+    Putstatic(u16) = 0xb3,
     Invalid(u8),
 }
 
@@ -213,6 +234,9 @@ impl<'a> Instructions<'a> {
             }
             0xac => Some(OpCode::IReturn),
             0xb8 => Some(OpCode::InvokeStatic(opnd!(u16))),
+            0xb1 => Some(OpCode::Return),
+            0xb3 => Some(OpCode::Putstatic(opnd!(u16))),
+            0xb2 => Some(OpCode::Getstatic(opnd!(u16))),
             _ => Some(OpCode::Invalid(op)),
         }
     }
@@ -361,6 +385,63 @@ impl JVMAttribute {
 }
 
 #[derive(Debug)]
+pub enum FieldDescriptor<'a> {
+    Int,
+    Long,
+    Bool,
+    Char,
+    Byte,
+    Short,
+    Float,
+    Double,
+    Object(&'a str),
+    Array,
+}
+
+impl<'a> FieldDescriptor<'a> {
+    pub const fn slot_count(&self) -> usize {
+        match self {
+            Self::Long | Self::Double => 2,
+            _ => 1,
+        }
+    }
+
+    pub fn from_str(s: &'a str) -> impl Iterator<Item = Self> {
+        let mut data = s.as_bytes();
+        core::iter::from_fn(move || {
+            if data.is_empty() {
+                return None;
+            }
+
+            let (desc, rest) = data.split_at(1);
+            data = rest;
+
+            let kind = match desc[0] {
+                b'I' => Self::Int,
+                b'J' => Self::Long,
+                b'D' => Self::Double,
+                b'F' => Self::Float,
+                b'S' => Self::Short,
+                b'C' => Self::Char,
+                b'B' => Self::Byte,
+                b'Z' => Self::Bool,
+                b'L' => {
+                    let semi = data.iter().position(|&b| b == b';')?;
+
+                    let (classname, rest) = data.split_at(semi);
+                    data = &rest[1..];
+
+                    Self::Object(unsafe { core::str::from_utf8_unchecked(classname) })
+                }
+                b'[' => Self::Array,
+                _ => return None,
+            };
+            Some(kind)
+        })
+    }
+}
+
+#[derive(Debug)]
 pub struct MethodDescriptor<'a> {
     args: &'a [u8],
     ret: &'a [u8],
@@ -378,6 +459,13 @@ impl<'a> MethodDescriptor<'a> {
 
     pub fn ret(&self) -> &'a [u8] {
         self.ret
+    }
+
+    pub fn args_descriptors(
+        &self,
+    ) -> impl Iterator<Item = impl Iterator<Item = FieldDescriptor<'a>>> {
+        self.args()
+            .map(|a| FieldDescriptor::from_str(unsafe { core::str::from_utf8_unchecked(a) }))
     }
 
     pub fn args(&self) -> impl Iterator<Item = &'a [u8]> {
@@ -408,23 +496,90 @@ impl<'a> MethodDescriptor<'a> {
     }
 
     pub fn args_size(&self) -> usize {
-        self.args()
-            .map(|arg| match arg[0] {
-                b'D' | b'J' => 2,
-                _ => 1,
-            })
+        self.args_descriptors()
+            .map(|mut descs| descs.next().map(|n| n.slot_count()).unwrap_or_default())
             .sum()
     }
 }
 
 #[derive(Debug, Clone)]
+pub struct JVMField {
+    name: Arc<str>,
+    descriptor: Arc<str>,
+    slot_count: usize,
+    access_flags: JVMAccessFlag,
+    attributes: Box<[JVMAttribute]>,
+}
+
+impl JVMField {
+    pub fn name(&self) -> &str {
+        &*self.name
+    }
+
+    pub fn raw_descriptor(&self) -> &str {
+        &*self.descriptor
+    }
+
+    pub fn descriptors<'s>(&'s self) -> impl Iterator<Item = FieldDescriptor<'s>> {
+        FieldDescriptor::from_str(&self.descriptor)
+    }
+
+    pub fn slot_count(&self) -> usize {
+        self.slot_count
+    }
+
+    pub const fn access_flags(&self) -> JVMAccessFlag {
+        self.access_flags
+    }
+
+    pub const fn attributes(&self) -> &[JVMAttribute] {
+        &self.attributes
+    }
+
+    pub fn parse(info: FieldInfo, constant_pool: &[ConstantPoolEntry]) -> io::Result<Self> {
+        let name = get_const!(
+            UTF8
+            constant_pool,
+            info.name_index,
+            "Field name"
+        );
+        let descriptor = get_const!(
+            UTF8
+            constant_pool,
+            info.descriptor_index,
+            "Field descriptor"
+        );
+
+        let mut attributes = Vec::with_capacity(info.attributes.len().saturating_sub(1));
+
+        let access_flags = JVMAccessFlag::from_bits_retain(info.access_flags);
+        for attr in info.attributes {
+            let parsed = JVMAttribute::parse(attr, constant_pool)?;
+            attributes.push(parsed);
+        }
+
+        let slot_count = FieldDescriptor::from_str(descriptor)
+            .next()
+            .map(|d| d.slot_count())
+            .unwrap_or_default();
+        Ok(Self {
+            access_flags,
+            name: name.clone(),
+            descriptor: descriptor.clone(),
+            slot_count,
+            attributes: attributes.into_boxed_slice(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct JVMMethod {
-    pub name: Arc<str>,
-    pub descriptor: Arc<str>,
-    pub args_size: usize,
-    pub access_flags: JVMAccessFlag,
-    pub code: Option<JVMCode>,
-    pub attributes: Box<[JVMAttribute]>,
+    name: Arc<str>,
+    descriptor: Arc<str>,
+    args_size: usize,
+    access_flags: JVMAccessFlag,
+    code: Option<JVMCode>,
+    attributes: Box<[JVMAttribute]>,
 }
 
 impl JVMMethod {
@@ -519,6 +674,7 @@ pub struct Class {
     pub access_flags: JVMAccessFlag,
     pub constant_pool: Box<[ConstantPoolEntry]>,
     pub methods: Box<[JVMMethod]>,
+    pub fields: Box<[JVMField]>,
     pub attributes: Box<[JVMAttribute]>,
 }
 
@@ -590,7 +746,13 @@ impl Class {
             methods.push(JVMMethod::parse(meth, &constant_pool)?);
         }
 
+        let mut fields = Vec::with_capacity(raw.fields.len());
+        for field in raw.fields {
+            fields.push(JVMField::parse(field, &constant_pool)?);
+        }
+
         Ok(Self {
+            fields: fields.into_boxed_slice(),
             this_name,
             super_name,
             minor_version: raw.minor_version,
