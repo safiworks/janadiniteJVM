@@ -12,3 +12,4 @@ members = ["janadinite-parse"]
 [dependencies]
 clap = { version = "4.6.6", features = ["derive"] }
 janadinite-parse = { path = "janadinite-parse" }
+rustc-hash = { version = "2.1.3", default-features = false }

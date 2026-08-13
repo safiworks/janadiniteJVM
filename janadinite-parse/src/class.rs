@@ -55,10 +55,14 @@ pub enum OpCode {
     ///
     /// The index is an unsigned byte that must be an index into the local variable array of the current frame (§2.6). The local variable at index must contain an int. The value of the local variable at index is pushed onto the operand stack.
     Iload(u8) = 0x15,
+    /// Load reference from local variable.
+    Aload(u8) = 0x19,
     /// Store int into local variable
     ///
     /// The index is an unsigned byte that must be an index into the local variable array of the current frame (§2.6). The value on the top of the operand stack must be of type int. It is popped from the operand stack, and the value of the local variable at index is set to value.
     IStore(u8) = 0x36,
+    /// Store reference into local variable.
+    AStore(u8) = 0x3a,
     /// Push Byte. The immediate byte is sign-extended to an int value. That value is pushed onto the operand stack.
     Bipush(i8) = 0x10,
     /// Increment local variable by constant.
@@ -116,6 +120,11 @@ pub enum OpCode {
     ///
     ///  The current method must have return type boolean, byte, short, char, or int. The value must be of type int. If the current method is a synchronized method, the monitor entered or reentered on invocation of the method is updated and possibly exited as if by execution of a monitorexit instruction (§monitorexit) in the current thread. If no exception is thrown, value is popped from the operand stack of the current frame (§2.6) and pushed onto the operand stack of the frame of the invoker. Any other values on the operand stack of the current method are discarded.
     IReturn = 0xac,
+    /// Invoke instance method; dispatch based on class
+    InvokeVirtual(u16) = 0xb6,
+    /// Invoke instance method; special handling for superclass, private, and instance initialization method invocations
+    InvokeSpecial(u16) = 0xb7,
+    /// Invoke a class (static) method.
     InvokeStatic(u16) = 0xb8,
     /// Return void from method.
     Return = 0xb1,
@@ -138,6 +147,30 @@ pub enum OpCode {
     The value is popped from the operand stack and undergoes value set conversion (§2.8.3), resulting in value'. The class field is set to value
     */
     Putstatic(u16) = 0xb3,
+    /// Fetch field from object
+    GetField(u16) = 0xb4,
+    /// Set field in object.
+    ///
+    ///  The unsigned indexbyte1 and indexbyte2 are used to construct an index into the run-time constant pool of the current class (§2.6), where the value of the index is (indexbyte1 << 8) | indexbyte2. The run-time constant pool item at that index must be a symbolic reference to a field (§5.1), which gives the name and descriptor of the field as well as a symbolic reference to the class in which the field is to be found. The class of objectref must not be an array. If the field is protected, and it is a member of a superclass of the current class, and the field is not declared in the same run-time package (§5.3) as the current class, then the class of objectref must be either the current class or a subclass of the current class.
+    PutField(u16) = 0xb5,
+    /**
+     * Create new object.
+
+    The unsigned indexbyte1 and indexbyte2 are used to construct an index into the run-time constant pool of the current class (§2.6), where the value of the index is (indexbyte1 << 8) | indexbyte2. The run-time constant pool item at the index must be a symbolic reference to a class or interface type. The named class or interface type is resolved (§5.4.3.1) and should result in a class type. Memory for a new instance of that class is allocated from the garbage-collected heap, and the instance variables of the new object are initialized to their default initial values (§2.3, §2.4). The objectref, a reference to the instance, is pushed onto the operand stack.
+    */
+    New(u16) = 0xbb,
+    /// Duplicate the top operand stack value.
+    Dup = 0x59,
+    /// Duplicate the top operand stack value and insert two values down.
+    DupX1 = 0x5a,
+    /// Duplicate the top operand stack value and insert two or three values down
+    DupX2 = 0x5b,
+    /// Duplicate the top one or two operand stack values
+    Dup2 = 0x5c,
+    /// Duplicate the top one or two operand stack values and insert two or three values down.
+    Dup2X1 = 0x5d,
+    /// Duplicate the top one or two operand stack values and insert two, three, or four values down.
+    Dup2X2 = 0x5e,
     Invalid(u8),
 }
 
@@ -192,10 +225,16 @@ impl<'a> Instructions<'a> {
                 let idx = opnd!(u8);
                 Some(OpCode::Iload(idx))
             }
+            0x19 => Some(OpCode::Aload(opnd!(u8))),
+            0x3a => Some(OpCode::AStore(opnd!(u8))),
             0x1a | 0x1b | 0x1c | 0x1d => {
                 // TODO: too lazy to do iload<n>
                 let idx = op - 0x1a;
                 Some(OpCode::Iload(idx))
+            }
+            0x2a | 0x2b | 0x2c | 0x2d => {
+                let idx = op - 0x2a;
+                Some(OpCode::Aload(idx))
             }
             0x36 => {
                 let idx = opnd!(u8);
@@ -205,6 +244,10 @@ impl<'a> Instructions<'a> {
                 let idx = op - 0x3b;
                 // TODO: too lazy to do istore<n>
                 Some(OpCode::IStore(idx))
+            }
+            0x4b | 0x4c | 0x4d | 0x4e => {
+                let idx = op - 0x4b;
+                Some(OpCode::AStore(idx))
             }
             0x84 => Some(OpCode::Iinc(opnd!(u8), opnd!(u8) as i8)),
             0x68 => Some(OpCode::Imul),
@@ -233,10 +276,21 @@ impl<'a> Instructions<'a> {
                 Some(OpCode::Goto(pc))
             }
             0xac => Some(OpCode::IReturn),
+            0xb6 => Some(OpCode::InvokeVirtual(opnd!(u16))),
+            0xb7 => Some(OpCode::InvokeSpecial(opnd!(u16))),
             0xb8 => Some(OpCode::InvokeStatic(opnd!(u16))),
             0xb1 => Some(OpCode::Return),
             0xb3 => Some(OpCode::Putstatic(opnd!(u16))),
             0xb2 => Some(OpCode::Getstatic(opnd!(u16))),
+            0xb4 => Some(OpCode::GetField(opnd!(u16))),
+            0xb5 => Some(OpCode::PutField(opnd!(u16))),
+            0xbb => Some(OpCode::New(opnd!(u16))),
+            0x59 => Some(OpCode::Dup),
+            0x5a => Some(OpCode::DupX1),
+            0x5b => Some(OpCode::DupX2),
+            0x5c => Some(OpCode::Dup2),
+            0x5d => Some(OpCode::Dup2X1),
+            0x5e => Some(OpCode::Dup2X2),
             _ => Some(OpCode::Invalid(op)),
         }
     }
@@ -251,11 +305,11 @@ impl<'a> Iterator for Instructions<'a> {
 
 #[derive(Debug, Clone)]
 pub struct JVMCode {
-    max_locals: u16,
-    max_stack: u16,
-    code: Box<[u8]>,
-    exception_table: Box<[ExceptionTableEntry]>,
-    attributes: Box<[JVMAttribute]>,
+    pub max_locals: u16,
+    pub max_stack: u16,
+    pub code: Box<[u8]>,
+    pub exception_table: Box<[ExceptionTableEntry]>,
+    pub attributes: Box<[JVMAttribute]>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -574,12 +628,12 @@ impl JVMField {
 
 #[derive(Debug, Clone)]
 pub struct JVMMethod {
-    name: Arc<str>,
-    descriptor: Arc<str>,
-    args_size: usize,
-    access_flags: JVMAccessFlag,
-    code: Option<JVMCode>,
-    attributes: Box<[JVMAttribute]>,
+    pub name: Arc<str>,
+    pub descriptor: Arc<str>,
+    pub args_size: usize,
+    pub access_flags: JVMAccessFlag,
+    pub code: Option<JVMCode>,
+    pub attributes: Box<[JVMAttribute]>,
 }
 
 impl JVMMethod {

@@ -7,7 +7,7 @@ use std::{
 };
 
 mod class;
-mod heap;
+pub(crate) mod heap;
 pub use class::*;
 use janadinite_parse::class::{JVMAccessFlag, JVMCode, OpCode};
 
@@ -47,6 +47,12 @@ impl JVMSlot {
     }
 
     fn object_clone(&self) -> Option<ObjectRef> {
+        // Safety: the object is cloned first
+        self.with_object(|r| r.clone())
+    }
+
+    #[inline(always)]
+    pub fn with_object<R>(&self, f: impl FnOnce(&ObjectRef) -> R) -> Option<R> {
         if !self.0.is_negative() {
             // !!!!!
             return None;
@@ -54,8 +60,7 @@ impl JVMSlot {
 
         let as_usize = (-self.0) as usize;
         let obj = ManuallyDrop::new(unsafe { ObjectRef::from_ptr(as_usize as *const _) });
-        // Safety: the object is cloned first
-        Some((&*obj).clone())
+        Some(f(&*obj))
     }
 
     pub const fn as_i32(&self) -> i32 {
@@ -94,8 +99,10 @@ pub enum VMError {
     NoSuchMethodInClass(String),
     NoSuchFieldInClass(String),
     NotStatic(String),
-    NoSuchClass,
+    IsAStatic(String),
+    NoSuchClass(String),
     Corrupted(String),
+    NotAnObject,
 }
 
 /// Describes the beginning of a stack frame in a method.
@@ -147,7 +154,7 @@ impl ThreadContext {
             .resize(locals_start + max_locals as usize, JVMSlot::null());
         self.stack.reserve(max_stack as usize);
 
-        for i in 0..args_size {
+        for i in (0..args_size).rev() {
             self.locals[locals_start + i as usize] =
                 self.stack.pop().ok_or(VMError::StackUnderflow)?;
         }
@@ -200,12 +207,39 @@ impl ThreadContext {
         self.stack.pop().map(|v| v.as_i32())
     }
 
+    #[inline(always)]
+    pub fn apop(&mut self) -> Option<ObjectRef> {
+        self.pop_slot().and_then(|a| a.into_object())
+    }
+
     /// Loads an integer value from the local variable at the given index.
     #[inline(always)]
     pub fn iload(&mut self, index: u16) -> Option<i32> {
         self.locals
             .get(index as usize + self.current_frame.locals_start)
             .map(|v| v.as_i32())
+    }
+
+    #[inline(always)]
+    pub fn aload(&mut self, index: u16) -> Option<ObjectRef> {
+        self.locals
+            .get(index as usize + self.current_frame.locals_start)
+            .and_then(|v| v.object_clone())
+    }
+
+    /// Stores an integer value into the local variable at the given index.
+    #[must_use = "Returns whether the store was successful"]
+    #[inline(always)]
+    pub fn astore(&mut self, index: u16, value: ObjectRef) -> bool {
+        if let Some(local) = self
+            .locals
+            .get_mut(index as usize + self.current_frame.locals_start)
+        {
+            *local = JVMSlot::from_object(value);
+            true
+        } else {
+            false
+        }
     }
 
     /// Stores an integer value into the local variable at the given index.
@@ -228,6 +262,37 @@ impl ThreadContext {
         self.locals
             .get_mut(index as usize + self.current_frame.locals_start)
     }
+
+    #[inline(always)]
+    pub fn dup(&mut self) {
+        let slot = self.pop_slot();
+        if let Some(slot) = slot {
+            self.push_slot(slot.clone());
+            self.push_slot(slot);
+        }
+    }
+
+    #[inline(always)]
+    pub fn dup2(&mut self) {
+        let slot1 = self.pop_slot();
+        let slot2 = self.pop_slot();
+
+        if let Some(slot2) = slot2.clone() {
+            self.push_slot(slot2);
+        }
+
+        if let Some(slot1) = slot1.clone() {
+            self.push_slot(slot1);
+        }
+
+        if let Some(slot2) = slot2 {
+            self.push_slot(slot2);
+        }
+
+        if let Some(slot1) = slot1 {
+            self.push_slot(slot1);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -246,6 +311,9 @@ impl VM {
         println!("{main_class:#?}");
         let mut loaded_classes = HashMap::with_capacity(1);
         loaded_classes.insert(main_class.name().clone(), main_class.clone());
+
+        let java = Arc::new(VMClass::java_lang_object());
+        loaded_classes.insert(java.name().clone(), java);
         Ok(Self {
             classpath,
             main_class,
@@ -275,7 +343,7 @@ impl VM {
             }
 
             let path = self.classpath.join(name).with_extension("class");
-            let mut file = File::open(path).map_err(|_| VMError::NoSuchClass)?;
+            let mut file = File::open(path).map_err(|_| VMError::NoSuchClass(name.into()))?;
             let class =
                 VMClass::parse(&mut file).map_err(|e| VMError::Corrupted(e.message().into()))?;
 
@@ -293,6 +361,23 @@ impl VM {
                 .expect("<clinit> run failed");
             }
             f(&class)
+        }
+    }
+
+    fn with_class_or_load_by_ref<R>(
+        &self,
+        this_class: &VMClass,
+        ref_idx: u16,
+        f: impl FnOnce(&Arc<VMClass>) -> Result<R, VMError>,
+    ) -> Result<R, VMError> {
+        let entry = this_class
+            .constant_pool()
+            .get_entry(ref_idx)
+            .ok_or(VMError::InvalidConstantPoolEntry(ref_idx))?;
+
+        match entry {
+            VMConstantPoolEntry::Class(name) => self.with_class_or_load_by_name(&*name, f),
+            _ => Err(VMError::InvalidConstantPoolEntry(ref_idx)),
         }
     }
 
@@ -386,7 +471,9 @@ impl VM {
 
         while let Some(opcode) = instr.next_op() {
             match opcode {
-                OpCode::InvokeStatic(ref_idx) => {
+                OpCode::InvokeStatic(ref_idx) | OpCode::InvokeSpecial(ref_idx) => {
+                    heap::safepoint();
+
                     let (meth_class, method_id) = self.get_method_or_resolve(class, ref_idx)?;
                     let method = meth_class.method_by_id(method_id).unwrap();
                     let code = method.code().expect("TODO: methods without code");
@@ -395,7 +482,33 @@ impl VM {
                         ref_idx,
                         code.max_stack(),
                         code.max_locals(),
-                        method.args_size() as u16,
+                        method.args_size() as u16
+                            + if matches!(opcode, OpCode::InvokeSpecial(_)) {
+                                1
+                            } else {
+                                0
+                            },
+                    )?;
+
+                    let result = self.run_code(meth_class, context, &code)?;
+                    context.pop_frame();
+                    if let Some(result) = result {
+                        context.ipush(result);
+                    }
+                }
+                OpCode::InvokeVirtual(ref_idx) => {
+                    heap::safepoint();
+
+                    // FIXME: InvokeVirtual depends on Objects's class not the static global class
+                    let (meth_class, method_id) = self.get_method_or_resolve(class, ref_idx)?;
+                    let method = meth_class.method_by_id(method_id).unwrap();
+                    let code = method.code().expect("TODO: methods without code");
+
+                    context.push_frame(
+                        ref_idx,
+                        code.max_stack(),
+                        code.max_locals(),
+                        method.args_size() as u16 + 1,
                     )?;
 
                     let result = self.run_code(meth_class, context, &code)?;
@@ -412,7 +525,7 @@ impl VM {
                         .ok_or_else(|| VMError::NotStatic(field.name().into()))?;
 
                     for slot in static_data.iter().rev() {
-                        // Safety: object access is not sync by default, statics are initialzied once (?)
+                        // Safety: object access is not sync by default, statics are initialized once (?)
                         context.push_slot(unsafe { &*slot.get() }.clone());
                     }
                 }
@@ -427,7 +540,42 @@ impl VM {
                         unsafe { *slot.get() = context.pop_slot().ok_or(VMError::StackUnderflow)? };
                     }
                 }
+                OpCode::GetField(ref_idx) | OpCode::PutField(ref_idx) => {
+                    let (field_class, field_id) = self.get_field_or_resolve(class, ref_idx)?;
+                    let field = field_class.field_by_id(field_id).unwrap();
+                    let slots = field.slot_count();
+                    let off = field
+                        .obj_off()
+                        .ok_or_else(|| VMError::IsAStatic(field.name().into()))?;
 
+                    // Safety: object isn't expected static...
+                    match opcode {
+                        OpCode::GetField(_) => {
+                            let object = context
+                                .pop_slot()
+                                .ok_or(VMError::StackUnderflow)?
+                                .into_object()
+                                .ok_or(VMError::NotAnObject)?;
+
+                            let slots = &object.data[off as usize..off as usize + slots];
+                            for slot in slots {
+                                context.push_slot(unsafe { &*slot.get() }.clone());
+                            }
+                        }
+                        OpCode::PutField(_) => {
+                            let got_slot = context.pop_slot().ok_or(VMError::StackUnderflow)?;
+                            let object = context
+                                .pop_slot()
+                                .ok_or(VMError::StackUnderflow)?
+                                .into_object()
+                                .ok_or(VMError::NotAnObject)?;
+
+                            let slots = &object.data[off as usize..off as usize + slots];
+                            unsafe { *slots[0].get() = got_slot };
+                        }
+                        _ => unreachable!(),
+                    }
+                }
                 OpCode::Bipush(b) => context.ipush(b as i32),
                 OpCode::Iload(idx) => {
                     let v = context.iload(idx as u16).ok_or(VMError::StackUnderflow)?;
@@ -436,6 +584,19 @@ impl VM {
                 OpCode::IStore(idx) => {
                     let v = context.ipop().ok_or(VMError::StackUnderflow)?;
                     if !context.istore(idx as u16, v) {
+                        return Err(VMError::InvalidLocal(idx as u16));
+                    }
+                }
+
+                OpCode::Aload(idx) => {
+                    let v = context
+                        .aload(idx as u16)
+                        .ok_or(VMError::InvalidLocal(idx.into()))?;
+                    context.push_slot(JVMSlot::from_object(v));
+                }
+                OpCode::AStore(idx) => {
+                    let v = context.apop().ok_or(VMError::StackUnderflow)?;
+                    if !context.astore(idx as u16, v) {
                         return Err(VMError::InvalidLocal(idx as u16));
                     }
                 }
@@ -508,6 +669,16 @@ impl VM {
                 }
                 OpCode::Return => return Ok(None),
                 OpCode::IReturn => return Ok(Some(context.ipop().ok_or(VMError::StackUnderflow)?)),
+                OpCode::New(class_ref) => {
+                    let new_class =
+                        self.with_class_or_load_by_ref(class, class_ref, |c| Ok(c.clone()))?;
+                    // Safety: Thread was already registered before this call.
+                    let instance = unsafe { heap::allocate(new_class) };
+                    context.push_slot(JVMSlot::from_object(instance));
+                }
+                OpCode::Dup => context.dup(),
+                OpCode::Dup2 => context.dup2(),
+                OpCode::Dup2X1 | OpCode::Dup2X2 | OpCode::DupX1 | OpCode::DupX2 => todo!("dupN_xY"),
                 OpCode::Invalid(i) => {
                     eprintln!("Invalid OpCode: {i}");
                 }

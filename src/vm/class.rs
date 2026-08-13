@@ -7,7 +7,7 @@ use std::{
 
 use janadinite_parse::{
     self as raw,
-    class::{self, Class, ConstantPoolEntry, JVMAccessFlag, JVMField, JVMMethod},
+    class::{self, Class, ConstantPoolEntry, JVMAccessFlag, JVMCode, JVMField, JVMMethod},
     io::ClassReader,
 };
 
@@ -23,6 +23,7 @@ pub type MethodID = usize;
 
 pub enum VMConstantPoolEntry {
     UTF8(Arc<str>),
+    Class(Arc<str>),
     MethodRef {
         unresolved_name: Arc<str>,
         unresolved_class: Arc<str>,
@@ -50,6 +51,7 @@ impl Debug for VMConstantPoolEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             VMConstantPoolEntry::UTF8(s) => write!(f, "UTF8({})", s),
+            VMConstantPoolEntry::Class(s) => write!(f, "Class({})", s),
             VMConstantPoolEntry::MethodRef {
                 unresolved_name,
                 unresolved_class,
@@ -102,6 +104,12 @@ impl VMConstantPool {
         for entry in entries {
             let resolved = match entry {
                 ConstantPoolEntry::Utf8 { string } => VMConstantPoolEntry::UTF8(string.clone()),
+                ConstantPoolEntry::Class { name_index } => {
+                    let class_name =
+                        class::get_const!(UTF8 entries, *name_index, "Class class name");
+
+                    VMConstantPoolEntry::Class(class_name.clone())
+                }
                 ConstantPoolEntry::Integer { bytes } => VMConstantPoolEntry::Int(*bytes as i32),
                 ConstantPoolEntry::Float { value } => VMConstantPoolEntry::Float(*value),
                 ConstantPoolEntry::Long { bytes } => VMConstantPoolEntry::Long(*bytes as i64),
@@ -208,6 +216,14 @@ pub struct VMField {
 
 impl VMField {
     #[inline]
+    pub fn obj_off(&self) -> Option<u32> {
+        match self.data {
+            FieldData::Normal(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    #[inline]
     pub fn as_static(&self) -> Option<&[UnsafeCell<JVMSlot>]> {
         let FieldData::Static(_, ref array) = self.data else {
             return None;
@@ -305,6 +321,34 @@ impl VMClass {
 
     pub fn constant_pool(&self) -> &VMConstantPool {
         &self.constant_pool
+    }
+
+    pub fn java_lang_object() -> Self {
+        Self {
+            name: "java/lang/Object".into(),
+            super_name: "".into(),
+            methods: Box::new([VMMethod {
+                id: 0,
+                method: JVMMethod {
+                    access_flags: JVMAccessFlag::ACC_PUBLIC,
+                    attributes: Box::new([]),
+                    name: "<init>".into(),
+                    descriptor: "()V".into(),
+                    args_size: 0,
+                    code: Some(JVMCode {
+                        max_stack: 1,
+                        max_locals: 1,
+                        code: Box::new([0xb1]),
+                        exception_table: Box::new([]),
+                        attributes: Box::new([]),
+                    }),
+                },
+            }]),
+            fields: Box::new([]),
+            constant_pool: VMConstantPool {
+                entries: Box::new([]),
+            },
+        }
     }
 
     pub fn parse(reader: &mut impl ClassReader) -> raw::io::Result<Self> {

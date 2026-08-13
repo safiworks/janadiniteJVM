@@ -19,6 +19,9 @@ fn main() {
     let classpath = args.classpath;
     let main_class = args.main_class;
 
+    vm::heap::register_thread();
+    std::thread::spawn(vm::heap::gc_thread);
+
     let vm = VM::open(classpath, &*main_class).expect("Failed to open Class");
     println!("main() => {:?}", vm.run_main());
 }
