@@ -27,8 +27,6 @@ impl JVMSlot {
 
     pub fn from_object(obj_ref: ObjectRef) -> Self {
         let obj = ((obj_ref.into_ptr() as usize) as isize).wrapping_neg();
-
-        assert!(obj.is_negative(), "Address too big?");
         Self(obj)
     }
 
