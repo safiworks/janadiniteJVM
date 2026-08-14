@@ -530,18 +530,11 @@ impl VM {
                         .ok_or(VMError::NotAnObject)?
                     {
                         let object = args[0].object_clone().unwrap();
-                        let obj_meth = object.class.method_by_id(method_id).unwrap();
-
-                        assert_eq!(
-                            obj_meth.name(),
-                            method.name(),
-                            "FIXME: I don't create proper VTables?"
-                        );
-                        assert_eq!(
-                            obj_meth.raw_descriptor(),
-                            method.raw_descriptor(),
-                            "FIXME: I don't create proper VTables?"
-                        );
+                        // FIXME: we should build a vtable
+                        let obj_meth = object
+                            .class
+                            .method_by_name(method.name(), Some(method.raw_descriptor()))
+                            .expect("Couldn't search for virtual method");
 
                         let code = obj_meth.code().expect("FIXME: Handle methods without code");
                         context.finish_push_frame(
