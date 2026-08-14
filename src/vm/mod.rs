@@ -479,7 +479,7 @@ impl VM {
         &self,
         this_class: &'c VMClass,
         ref_idx: u16,
-    ) -> Result<(&'c VMClass, FieldID), VMError> {
+    ) -> Result<(&'c VMClass, FieldOff), VMError> {
         let entry = this_class
             .constant_pool()
             .get_entry(ref_idx)
@@ -499,7 +499,7 @@ impl VM {
                         self.with_class_or_load_by_name(&*unresolved_class, |class| {
                             class
                                 .field_by_name(&*unresolved_name)
-                                .map(|f| (class.clone(), f.id()))
+                                .map(|f| (class.clone(), f.off()))
                                 .ok_or_else(|| {
                                     VMError::NoSuchFieldInClass(String::from(&**unresolved_name))
                                 })
@@ -573,8 +573,8 @@ impl VM {
                         let code = obj_meth.code().expect("FIXME: Handle methods without code");
                         context.finish_push_frame(
                             ref_idx,
-                            code.max_stack(),
                             code.max_locals(),
+                            code.max_stack(),
                             method.args_size() as u16 + 1,
                         );
 
@@ -602,8 +602,8 @@ impl VM {
                     }
                 }
                 OpCode::Getstatic(ref_idx) => {
-                    let (field_class, field_id) = self.get_field_or_resolve(class, ref_idx)?;
-                    let field = field_class.field_by_id(field_id).unwrap();
+                    let (field_class, field_idx) = self.get_field_or_resolve(class, ref_idx)?;
+                    let field = field_class.field_by_idx(field_idx).unwrap();
                     let static_data = field
                         .as_static()
                         .ok_or_else(|| VMError::NotStatic(field.name().into()))?;
@@ -614,8 +614,8 @@ impl VM {
                     }
                 }
                 OpCode::Putstatic(ref_idx) => {
-                    let (field_class, field_id) = self.get_field_or_resolve(class, ref_idx)?;
-                    let field = field_class.field_by_id(field_id).unwrap();
+                    let (field_class, field_idx) = self.get_field_or_resolve(class, ref_idx)?;
+                    let field = field_class.field_by_idx(field_idx).unwrap();
                     let static_data = field
                         .as_static()
                         .ok_or_else(|| VMError::NotStatic(field.name().into()))?;
@@ -625,8 +625,8 @@ impl VM {
                     }
                 }
                 OpCode::GetField(ref_idx) | OpCode::PutField(ref_idx) => {
-                    let (field_class, field_id) = self.get_field_or_resolve(class, ref_idx)?;
-                    let field = field_class.field_by_id(field_id).unwrap();
+                    let (field_class, field_idx) = self.get_field_or_resolve(class, ref_idx)?;
+                    let field = field_class.field_by_idx(field_idx).unwrap();
                     let slots = field.slot_count();
                     let off = field
                         .obj_off()
@@ -777,9 +777,7 @@ impl VM {
         let main_class = &self.main_class;
 
         let meth = main_class
-            .methods()
-            .iter()
-            .find(|m| m.name() == "main")
+            .method_by_name("main", None)
             .ok_or_else(|| VMError::NoSuchMethodInClass("main".to_string()))?;
 
         if !meth.access_flags().contains(JVMAccessFlag::ACC_STATIC) {
