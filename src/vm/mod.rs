@@ -9,7 +9,7 @@ use std::{
 mod class;
 pub(crate) mod heap;
 pub use class::*;
-use janadinite_parse::class::{JVMAccessFlag, JVMCode, OpCode};
+use janadinite_parse::class::{Class, JVMAccessFlag, JVMCode, OpCode};
 
 use crate::vm::heap::ObjectRef;
 
@@ -323,22 +323,75 @@ pub struct VM {
 }
 
 impl VM {
-    pub fn open(classpath: PathBuf, main_class: &str) -> std::io::Result<Self> {
-        let main_class_path = classpath.join(main_class).with_extension("class");
-        let mut main_class_file = File::open(main_class_path)?;
-        let main_class = Arc::new(VMClass::parse(&mut main_class_file)?);
-
-        println!("{main_class:#?}");
+    fn from_class_path(classpath: PathBuf) -> Self {
         let mut loaded_classes = HashMap::with_capacity(1);
-        loaded_classes.insert(main_class.name().clone(), main_class.clone());
 
         let java = Arc::new(VMClass::java_lang_object());
-        loaded_classes.insert(java.name().clone(), java);
-        Ok(Self {
+        loaded_classes.insert(java.name().clone(), java.clone());
+        Self {
             classpath,
-            main_class,
+            main_class: java,
             loaded_classes: RwLock::new(loaded_classes),
-        })
+        }
+    }
+    pub fn open(classpath: PathBuf, main_class: &str) -> Result<Self, VMError> {
+        let mut this = Self::from_class_path(classpath);
+        let main_class = this.with_class_or_load_by_name(main_class, |c| Ok(c.clone()))?;
+
+        println!("{main_class:#?}");
+
+        this.main_class = main_class;
+        Ok(this)
+    }
+
+    #[inline]
+    fn load_class_by_name<'s>(
+        &'s self,
+        mut write_guard: std::sync::RwLockWriteGuard<'s, HashMap<Arc<str>, Arc<VMClass>>>,
+        name: &str,
+    ) -> Result<Arc<VMClass>, VMError> {
+        if let Some(class) = write_guard.get(name) {
+            return Ok(class.clone());
+        }
+
+        let path = self.classpath.join(name).with_extension("class");
+        let mut file = File::open(path).map_err(|_| VMError::NoSuchClass(name.into()))?;
+        let raw_class =
+            Class::decode(&mut file).map_err(|e| VMError::Corrupted(e.message().into()))?;
+
+        let super_class = if raw_class.super_name.is_empty() {
+            None
+        } else {
+            let sup = self.load_class_by_name(write_guard, &raw_class.super_name)?;
+            write_guard = self
+                .loaded_classes
+                .write()
+                .expect("Failed to reacquire lock on loaded classes");
+
+            if let Some(class) = write_guard.get(name) {
+                return Ok(class.clone());
+            }
+            Some(sup)
+        };
+
+        let class = VMClass::create(raw_class, super_class)
+            .map_err(|e| VMError::Corrupted(e.message().into()))?;
+
+        let class = Arc::new(class);
+        write_guard.insert(name.into(), class.clone());
+        drop(write_guard);
+
+        if let Some(clinit) = class.method_by_name("<clinit>", Some("()V")) {
+            let code = clinit.code().expect("<clinit> no code");
+            self.run_code(
+                &class,
+                &mut ThreadContext::new(code.max_stack(), code.max_locals()),
+                code,
+            )
+            .expect("<clinit> run failed");
+        }
+
+        Ok(class)
     }
 
     fn with_class_or_load_by_name<R>(
@@ -354,33 +407,14 @@ impl VM {
             return f(class);
         } else {
             drop(loaded_classes);
-            let mut write_guard = self
+            let write_guard = self
                 .loaded_classes
                 .write()
                 .expect("failed to lock loaded_classes");
             if let Some(class) = write_guard.get(name) {
                 return f(class);
             }
-
-            let path = self.classpath.join(name).with_extension("class");
-            let mut file = File::open(path).map_err(|_| VMError::NoSuchClass(name.into()))?;
-            let class =
-                VMClass::parse(&mut file).map_err(|e| VMError::Corrupted(e.message().into()))?;
-
-            let class = Arc::new(class);
-            write_guard.insert(name.into(), class.clone());
-            drop(write_guard);
-
-            if let Some(clinit) = class.method_by_name("<clinit>", Some("()V")) {
-                let code = clinit.code().expect("<clinit> no code");
-                self.run_code(
-                    &class,
-                    &mut ThreadContext::new(code.max_stack(), code.max_locals()),
-                    code,
-                )
-                .expect("<clinit> run failed");
-            }
-            f(&class)
+            f(&self.load_class_by_name(write_guard, name)?)
         }
     }
 
@@ -740,17 +774,7 @@ impl VM {
         Ok(None)
     }
     pub fn run_main(&self) -> Result<Option<i32>, VMError> {
-        let main_class = self.main_class.clone();
-
-        if let Some(clinit) = main_class.method_by_name("<clinit>", Some("()V")) {
-            let code = clinit.code().expect("<clinit> no code");
-            self.run_code(
-                &main_class,
-                &mut ThreadContext::new(code.max_stack(), code.max_locals()),
-                code,
-            )
-            .expect("<clinit> run failed");
-        }
+        let main_class = &self.main_class;
 
         let meth = main_class
             .methods()

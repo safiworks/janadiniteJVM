@@ -8,7 +8,6 @@ use std::{
 use janadinite_parse::{
     self as raw,
     class::{self, Class, ConstantPoolEntry, JVMAccessFlag, JVMCode, JVMField, JVMMethod},
-    io::ClassReader,
 };
 
 use crate::vm::JVMSlot;
@@ -268,7 +267,7 @@ impl VMMethod {
 #[derive(Debug)]
 pub struct VMClass {
     name: Arc<str>,
-    super_name: Arc<str>,
+    super_class: Option<Arc<VMClass>>,
     methods: Box<[VMMethod]>,
     fields: Box<[VMField]>,
     constant_pool: VMConstantPool,
@@ -279,8 +278,8 @@ impl VMClass {
         &self.name
     }
 
-    pub fn super_name(&self) -> &Arc<str> {
-        &self.super_name
+    pub fn super_class(&self) -> Option<&Arc<VMClass>> {
+        self.super_class.as_ref()
     }
 
     pub fn methods(&self) -> &[VMMethod] {
@@ -326,7 +325,7 @@ impl VMClass {
     pub fn java_lang_object() -> Self {
         Self {
             name: "java/lang/Object".into(),
-            super_name: "".into(),
+            super_class: None,
             methods: Box::new([VMMethod {
                 id: 0,
                 method: JVMMethod {
@@ -351,8 +350,7 @@ impl VMClass {
         }
     }
 
-    pub fn parse(reader: &mut impl ClassReader) -> raw::io::Result<Self> {
-        let class = Class::decode(reader)?;
+    pub fn create(class: Class, super_class: Option<Arc<VMClass>>) -> raw::io::Result<Self> {
         let methods: Box<[VMMethod]> = class
             .methods
             .into_iter()
@@ -400,7 +398,7 @@ impl VMClass {
         )?;
         Ok(Self {
             name: class.this_name,
-            super_name: class.super_name,
+            super_class,
             fields,
             methods,
             constant_pool,
