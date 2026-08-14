@@ -23,5 +23,9 @@ fn main() {
     std::thread::spawn(vm::heap::gc_thread);
 
     let vm = VM::open(classpath, &*main_class).expect("Failed to open Class");
-    println!("main() => {:?}", vm.run_main());
+
+    let time = std::time::Instant::now();
+    let res = vm.run_main();
+    let elapsed = time.elapsed().as_micros();
+    println!("main() => {res:?} {elapsed}us");
 }

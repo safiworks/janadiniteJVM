@@ -228,7 +228,7 @@ impl Heap {
 
 #[derive(Debug)]
 pub struct Object {
-    class: Arc<VMClass>,
+    pub class: Arc<VMClass>,
     gc_refs: UnsafeCell<usize>,
     pub data: Box<[UnsafeCell<JVMSlot>]>,
 }

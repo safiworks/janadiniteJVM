@@ -139,24 +139,33 @@ impl ThreadContext {
         }
     }
 
-    /// Pushes a new stack frame onto the frame stack.
-    pub fn push_frame(
-        &mut self,
-        meth_ref: u16,
-        max_stack: u16,
-        max_locals: u16,
-        args_size: u16,
-    ) -> Result<(), VMError> {
+    /// Must call [`Self::finish_push_frame`] first.
+    pub fn pop_create_args(&mut self, args_size: u16) -> Result<&mut [JVMSlot], VMError> {
         let locals_start = self.locals.len();
         self.locals
-            .resize(locals_start + max_locals as usize, JVMSlot::null());
-        self.stack.reserve(max_stack as usize);
+            .resize(locals_start + args_size as usize, JVMSlot::null());
 
         for i in (0..args_size).rev() {
             self.locals[locals_start + i as usize] =
                 self.stack.pop().ok_or(VMError::StackUnderflow)?;
         }
 
+        Ok(&mut self.locals[locals_start..])
+    }
+
+    pub fn finish_push_frame(
+        &mut self,
+        meth_ref: u16,
+        max_locals: u16,
+        max_stack: u16,
+        args_size: u16,
+    ) {
+        assert!(max_locals >= args_size);
+        let locals_start = self.locals.len() - args_size as usize;
+        self.locals
+            .resize(locals_start + max_locals as usize, JVMSlot::null());
+
+        self.stack.reserve(max_stack as usize);
         self.prev_frames.push(self.current_frame);
         self.current_frame = StackFrame {
             meth_ref,
@@ -164,7 +173,20 @@ impl ThreadContext {
             locals_start,
             stack_start: self.stack.len(),
         };
+    }
 
+    /// Pushes a new stack frame onto the frame stack.
+    ///
+    /// Same as calling [`Self::pop_create_args`] and then [`Self::finish_push_frame`] immediately.
+    pub fn push_frame(
+        &mut self,
+        meth_ref: u16,
+        max_stack: u16,
+        max_locals: u16,
+        args_size: u16,
+    ) -> Result<(), VMError> {
+        self.pop_create_args(args_size)?;
+        self.finish_push_frame(meth_ref, max_locals, max_stack, args_size);
         Ok(())
     }
 
@@ -497,22 +519,59 @@ impl VM {
                 OpCode::InvokeVirtual(ref_idx) => {
                     heap::safepoint();
 
-                    // FIXME: InvokeVirtual depends on Objects's class not the static global class
                     let (meth_class, method_id) = self.get_method_or_resolve(class, ref_idx)?;
+
                     let method = meth_class.method_by_id(method_id).unwrap();
-                    let code = method.code().expect("TODO: methods without code");
+                    let args =
+                        context.pop_create_args(method.args_size() as u16 + 1 /* object */)?;
 
-                    context.push_frame(
-                        ref_idx,
-                        code.max_stack(),
-                        code.max_locals(),
-                        method.args_size() as u16 + 1,
-                    )?;
+                    if args[0]
+                        .with_object(|obj| !core::ptr::eq(meth_class, Arc::as_ptr(&obj.class)))
+                        .ok_or(VMError::NotAnObject)?
+                    {
+                        let object = args[0].object_clone().unwrap();
+                        let obj_meth = object.class.method_by_id(method_id).unwrap();
 
-                    let result = self.run_code(meth_class, context, &code)?;
-                    context.pop_frame();
-                    if let Some(result) = result {
-                        context.ipush(result);
+                        assert_eq!(
+                            obj_meth.name(),
+                            method.name(),
+                            "FIXME: I don't create proper VTables?"
+                        );
+                        assert_eq!(
+                            obj_meth.raw_descriptor(),
+                            method.raw_descriptor(),
+                            "FIXME: I don't create proper VTables?"
+                        );
+
+                        let code = obj_meth.code().expect("FIXME: Handle methods without code");
+                        context.finish_push_frame(
+                            ref_idx,
+                            code.max_stack(),
+                            code.max_locals(),
+                            method.args_size() as u16 + 1,
+                        );
+
+                        let result = self.run_code(&object.class, context, &code)?;
+                        context.pop_frame();
+                        if let Some(result) = result {
+                            context.ipush(result);
+                        }
+                    } else {
+                        /* normal invokespecial */
+                        let code = method.code().expect("TODO: methods without code");
+
+                        context.finish_push_frame(
+                            ref_idx,
+                            code.max_stack(),
+                            code.max_locals(),
+                            method.args_size() as u16 + 1,
+                        );
+
+                        let result = self.run_code(meth_class, context, &code)?;
+                        context.pop_frame();
+                        if let Some(result) = result {
+                            context.ipush(result);
+                        }
                     }
                 }
                 OpCode::Getstatic(ref_idx) => {
