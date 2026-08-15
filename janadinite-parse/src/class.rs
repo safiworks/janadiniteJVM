@@ -48,23 +48,71 @@ bitflags::bitflags! {
 }
 
 /// Describes all (implemented) JVM instructions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(macros::OpcodeDecode, Debug, Clone, Copy, PartialEq, Eq)]
+#[decode(wide_prefix = 0xc4, fallback = custom_decode)]
 #[repr(u8)]
 pub enum OpCode {
+    /// Push long constant 0
+    Lconst0 = 0x9,
+    /// Push long constant 1
+    Lconst1 = 0xa,
+    /// Push long or double from run-time constant pool (wide index)
+    Ldc2W(u16) = 0x14,
     /// Load int from local variable
     ///
     /// The index is an unsigned byte that must be an index into the local variable array of the current frame (§2.6). The local variable at index must contain an int. The value of the local variable at index is pushed onto the operand stack.
+    #[decode(short(base = 0x1a, count = 4))] /* TODO: iload<n> */
     Iload(u8) = 0x15,
+    /// Load long from local variable.
+    ///
+    /// The index is an unsigned byte that must be an index into the local variable array of the current frame (§2.6). The local variable at index must contain a long. The value of the local variable at index is pushed onto the operand stack.
+    #[decode(short(base = 0x1e, count = 4))]
+    Lload(u8) = 0x16,
+    /// Load float from local variable.
+    ///
+    /// The index is an unsigned byte that must be an index into the local variable array of the current frame (§2.6). The local variable at index must contain a float. The value of the local variable at index is pushed onto the operand stack.
+    #[decode(short(base = 0x22, count = 4))]
+    Fload(u8) = 0x17,
+    /// Load double from local variable.
+    ///
+    /// The index is an unsigned byte that must be an index into the local variable array of the current frame (§2.6). The local variable at index must contain a double. The value of the local variable at index is pushed onto the operand stack.
+    #[decode(short(base = 0x26, count = 4))]
+    Dload(u8) = 0x18,
     /// Load reference from local variable.
+    #[decode(short(base = 0x2a, count = 4))]
     Aload(u8) = 0x19,
     /// Store int into local variable
     ///
     /// The index is an unsigned byte that must be an index into the local variable array of the current frame (§2.6). The value on the top of the operand stack must be of type int. It is popped from the operand stack, and the value of the local variable at index is set to value.
+    #[decode(short(base = 0x3b, count = 4))]
     IStore(u8) = 0x36,
+    /// Store long into local variable.
+    #[decode(short(base = 0x3f, count = 4))]
+    LStore(u8) = 0x37,
+    /// Store float into local variable
+    #[decode(short(base = 0x43, count = 4))]
+    FStore(u8) = 0x38,
+    /// Store double into local variable.
+    #[decode(short(base = 0x47, count = 4))]
+    DStore(u8) = 0x39,
     /// Store reference into local variable.
+    #[decode(short(base = 0x4b, count = 4))]
     AStore(u8) = 0x3a,
     /// Push Byte. The immediate byte is sign-extended to an int value. That value is pushed onto the operand stack.
+    #[decode(skip)]
     Bipush(i8) = 0x10,
+    /// Duplicate the top operand stack value.
+    Dup = 0x59,
+    /// Duplicate the top operand stack value and insert two values down.
+    DupX1 = 0x5a,
+    /// Duplicate the top operand stack value and insert two or three values down
+    DupX2 = 0x5b,
+    /// Duplicate the top one or two operand stack values
+    Dup2 = 0x5c,
+    /// Duplicate the top one or two operand stack values and insert two or three values down.
+    Dup2X1 = 0x5d,
+    /// Duplicate the top one or two operand stack values and insert two, three, or four values down.
+    Dup2X2 = 0x5e,
     /// Increment local variable by constant.
     /// The index is an unsigned byte that must be an index into the local variable array of the current frame (§2.6).
     ///
@@ -78,22 +126,154 @@ pub enum OpCode {
     ///
     /// Despite the fact that overflow may occur, execution of an imul instruction never throws a run-time exception
     Imul = 0x68,
+    /// Multiply long.
+    ///
+    /// Both value1 and value2 must be of type long. The values are popped from the operand stack. The long result is value1 * value2. The result is pushed onto the operand stack.
+    ///
+    /// The result is the 64 low-order bits of the true mathematical result in a sufficiently wide two's-complement format, represented as a value of type long. If overflow occurs, the sign of the result may not be the same as the sign of the mathematical multiplication of the two values.
+    ///
+    /// Despite the fact that overflow may occur, execution of an lmul instruction never throws a run-time exception.
+    Lmul = 0x69,
+    /// Multiply float.
+    ///
+    /// Both value1 and value2 must be of type float. The values are popped from the operand stack and multiplied according to IEEE 754 rules. The float result is pushed onto the operand stack.
+    Fmul = 0x6a,
+    /// Multiply double.
+    ///
+    /// Both value1 and value2 must be of type double. The values are popped from the operand stack and multiplied according to IEEE 754 rules. The double result is pushed onto the operand stack.
+    Dmul = 0x6b,
     /// Divide int.
     ///
     /// Both value1 and value2 must be of type int. The values are popped from the operand stack. The int result is value1 / value2. The result is pushed onto the operand stack.
     Idiv = 0x6c,
+    /// Divide long.
+    ///
+    /// Both value1 and value2 must be of type long. The values are popped from the operand stack. The long result is value1 / value2. The result is pushed onto the operand stack.
+    Ldiv = 0x6d,
+    /// Divide float.
+    ///
+    /// Both value1 and value2 must be of type float. The values are popped from the operand stack and divided according to IEEE 754 rules. The float result is pushed onto the operand stack.
+    Fdiv = 0x6e,
+    /// Divide double.
+    ///
+    /// Both value1 and value2 must be of type double. The values are popped from the operand stack and divided according to IEEE 754 rules. The double result is pushed onto the operand stack.
+    Ddiv = 0x6f,
     /// Subtract int.
     ///
     /// Both value1 and value2 must be of type int. The values are popped from the operand stack. The int result is value1 - value2. The result is pushed onto the operand stack.
     Isub = 0x64,
+    /// Subtract long.
+    ///
+    /// Both value1 and value2 must be of type long. The values are popped from the operand stack. The long result is value1 - value2. The result is pushed onto the operand stack.
+    Lsub = 0x65,
+    /// Subtract float.
+    ///
+    /// Both value1 and value2 must be of type float. The values are popped from the operand stack and subtracted according to IEEE 754 rules. The float result is pushed onto the operand stack.
+    Fsub = 0x66,
+    /// Subtract double.
+    ///
+    /// Both value1 and value2 must be of type double. The values are popped from the operand stack and subtracted according to IEEE 754 rules. The double result is pushed onto the operand stack.
+    Dsub = 0x67,
     /// Add int.
     ///
     /// Both value1 and value2 must be of type int. The values are popped from the operand stack. The int result is value1 + value2. The result is pushed onto the operand stack.
     Iadd = 0x60,
+    /// Add long.
+    ///
+    /// Both value1 and value2 must be of type long. The values are popped from the operand stack. The long result is value1 + value2. The result is pushed onto the operand stack.
+    Ladd = 0x61,
+    /// Add float.
+    ///
+    /// Both value1 and value2 must be of type float. The values are popped from the operand stack and added according to IEEE 754 rules. The float result is pushed onto the operand stack.
+    Fadd = 0x62,
+    /// Add double.
+    ///
+    /// Both value1 and value2 must be of type double. The values are popped from the operand stack and added according to IEEE 754 rules. The double result is pushed onto the operand stack.
+    Dadd = 0x63,
+    /// Remainder int.
+    ///
+    /// Both value1 and value2 must be of type int. The values are popped from the operand stack. The int result is value1 - (value1 / value2) * value2, matching the sign of value1. The result is pushed onto the operand stack.
+    Irem = 0x70,
+    /// Remainder long.
+    ///
+    /// Both value1 and value2 must be of type long. The values are popped from the operand stack. The long result is value1 - (value1 / value2) * value2, matching the sign of value1. The result is pushed onto the operand stack.
+    Lrem = 0x71,
+    /// Remainder float.
+    ///
+    /// Both value1 and value2 must be of type float. The values are popped from the operand stack and the IEEE 754 float remainder of value1 by value2 is computed and pushed onto the operand stack.
+    Frem = 0x72,
+    /// Remainder double.
+    ///
+    /// Both value1 and value2 must be of type double. The values are popped from the operand stack and the IEEE 754 double remainder of value1 by value2 is computed and pushed onto the operand stack.
+    Drem = 0x73,
     /// Negate int.
     ///
     /// The value must be of type int. It is popped from the operand stack. The int result is -value. The result is pushed onto the operand stack.
     Ineg = 0x74,
+    /// Negate long.
+    ///
+    /// The value must be of type long. It is popped from the operand stack. The long result is -value. The result is pushed onto the operand stack.
+    Lneg = 0x75,
+    /// Negate float.
+    ///
+    /// The value must be of type float. It is popped from the operand stack. The float result is -value, computed per IEEE 754 negation rules. The result is pushed onto the operand stack.
+    Fneg = 0x76,
+    /// Negate double.
+    ///
+    /// The value must be of type double. It is popped from the operand stack. The double result is -value, computed per IEEE 754 negation rules. The result is pushed onto the operand stack.
+    Dneg = 0x77,
+    /// Shift int left.
+    ///
+    /// value1 must be of type int and value2 must be of type int. Both are popped from the operand stack. An int result is calculated by shifting value1 left by the number of bit positions given by the low 5 bits of value2. The result is pushed onto the operand stack.
+    Ishl = 0x78,
+    /// Shift long left.
+    ///
+    /// value1 must be of type long and value2 must be of type int. Both are popped from the operand stack. A long result is calculated by shifting value1 left by the number of bit positions given by the low 6 bits of value2. The result is pushed onto the operand stack.
+    Lshl = 0x79,
+    /// Arithmetic shift int right.
+    ///
+    /// value1 must be of type int and value2 must be of type int. Both are popped from the operand stack. An int result is calculated by shifting value1 right, sign-extending, by the number of bit positions given by the low 5 bits of value2. The result is pushed onto the operand stack.
+    Ishr = 0x7a,
+    /// Arithmetic shift long right.
+    ///
+    /// value1 must be of type long and value2 must be of type int. Both are popped from the operand stack. A long result is calculated by shifting value1 right, sign-extending, by the number of bit positions given by the low 6 bits of value2. The result is pushed onto the operand stack.
+    Lshr = 0x7b,
+    /// Logical shift int right.
+    ///
+    /// value1 must be of type int and value2 must be of type int. Both are popped from the operand stack. An int result is calculated by shifting value1 right, filling with zeros, by the number of bit positions given by the low 5 bits of value2. The result is pushed onto the operand stack.
+    Iushr = 0x7c,
+    /// Logical shift long right.
+    ///
+    /// value1 must be of type long and value2 must be of type int. Both are popped from the operand stack. A long result is calculated by shifting value1 right, filling with zeros, by the number of bit positions given by the low 6 bits of value2. The result is pushed onto the operand stack.
+    Lushr = 0x7d,
+    /// Boolean AND int.
+    ///
+    /// Both value1 and value2 must be of type int. The values are popped from the operand stack. The int result is the bitwise AND of value1 and value2. The result is pushed onto the operand stack.
+    Iand = 0x7e,
+    /// Boolean AND long.
+    ///
+    /// Both value1 and value2 must be of type long. The values are popped from the operand stack. The long result is the bitwise AND of value1 and value2. The result is pushed onto the operand stack.
+    Land = 0x7f,
+    /// Boolean OR int.
+    ///
+    /// Both value1 and value2 must be of type int. The values are popped from the operand stack. The int result is the bitwise OR of value1 and value2. The result is pushed onto the operand stack.
+    Ior = 0x80,
+    /// Boolean OR long.
+    ///
+    /// Both value1 and value2 must be of type long. The values are popped from the operand stack. The long result is the bitwise OR of value1 and value2. The result is pushed onto the operand stack.
+    Lor = 0x81,
+    /// Boolean XOR int.
+    ///
+    /// Both value1 and value2 must be of type int. The values are popped from the operand stack. The int result is the bitwise XOR of value1 and value2. The result is pushed onto the operand stack.
+    Ixor = 0x82,
+    /// Boolean XOR long.
+    ///
+    /// Both value1 and value2 must be of type long. The values are popped from the operand stack. The long result is the bitwise XOR of value1 and value2. The result is pushed onto the operand stack.
+    Lxor = 0x83,
+    /// Convert int to long
+    ///
+    ///  The value on the top of the operand stack must be of type int. It is popped from the operand stack and sign-extended to a long result. That result is pushed onto the operand stack.
+    I2l = 0x85,
     /// Branch always/
     Goto(i16) = 0xa7,
     /// Branch if int comparison succeeds.
@@ -108,6 +288,10 @@ pub enum OpCode {
     ///
     /// if_icmpne succeeds if and only if value1 != value2
     IfIcmpNe(i16) = 0xa0,
+    /// Compare long
+    ///
+    ///  Both value1 and value2 must be of type long. They are both popped from the operand stack, and a signed integer comparison is performed. If value1 is greater than value2, the int value 1 is pushed onto the operand stack. If value1 is equal to value2, the int value 0 is pushed onto the operand stack. If value1 is less than value2, the int value -1 is pushed onto the operand stack.
+    Lcmp = 0x94,
     /// Branch if int comparison with zero succeeds.
     /// The value must be of type int. It is popped from the operand stack and compared against zero. All comparisons are signed. The results of the comparisons are as follows:
     /// - ifne succeeds if and only if value ≠ 0.
@@ -120,6 +304,22 @@ pub enum OpCode {
     ///
     ///  The current method must have return type boolean, byte, short, char, or int. The value must be of type int. If the current method is a synchronized method, the monitor entered or reentered on invocation of the method is updated and possibly exited as if by execution of a monitorexit instruction (§monitorexit) in the current thread. If no exception is thrown, value is popped from the operand stack of the current frame (§2.6) and pushed onto the operand stack of the frame of the invoker. Any other values on the operand stack of the current method are discarded.
     IReturn = 0xac,
+    /// Return long from method.
+    ///
+    /// The current method must have return type long. The value on top of the operand stack must be of type long. It is popped from the operand stack of the current frame and pushed onto the operand stack of the frame of the invoker.
+    LReturn = 0xad,
+    /// Return float from method.
+    ///
+    /// The current method must have return type float. The value on top of the operand stack must be of type float. It is popped from the operand stack of the current frame and pushed onto the operand stack of the frame of the invoker.
+    FReturn = 0xae,
+    /// Return double from method.
+    ///
+    /// The current method must have return type double. The value on top of the operand stack must be of type double. It is popped from the operand stack of the current frame and pushed onto the operand stack of the frame of the invoker.
+    DReturn = 0xaf,
+    /// Return reference from method.
+    ///
+    /// The current method must have a reference return type. The value on top of the operand stack must be a reference. It is popped from the operand stack of the current frame and pushed onto the operand stack of the frame of the invoker.
+    AReturn = 0xb0,
     /// Invoke instance method; dispatch based on class
     InvokeVirtual(u16) = 0xb6,
     /// Invoke instance method; special handling for superclass, private, and instance initialization method invocations
@@ -159,19 +359,65 @@ pub enum OpCode {
     The unsigned indexbyte1 and indexbyte2 are used to construct an index into the run-time constant pool of the current class (§2.6), where the value of the index is (indexbyte1 << 8) | indexbyte2. The run-time constant pool item at the index must be a symbolic reference to a class or interface type. The named class or interface type is resolved (§5.4.3.1) and should result in a class type. Memory for a new instance of that class is allocated from the garbage-collected heap, and the instance variables of the new object are initialized to their default initial values (§2.3, §2.4). The objectref, a reference to the instance, is pushed onto the operand stack.
     */
     New(u16) = 0xbb,
-    /// Duplicate the top operand stack value.
-    Dup = 0x59,
-    /// Duplicate the top operand stack value and insert two values down.
-    DupX1 = 0x5a,
-    /// Duplicate the top operand stack value and insert two or three values down
-    DupX2 = 0x5b,
-    /// Duplicate the top one or two operand stack values
-    Dup2 = 0x5c,
-    /// Duplicate the top one or two operand stack values and insert two or three values down.
-    Dup2X1 = 0x5d,
-    /// Duplicate the top one or two operand stack values and insert two, three, or four values down.
-    Dup2X2 = 0x5e,
+
+    #[decode(wide(op = 0x15))]
+    // The `wide` instruction (0xc4) modifies the behavior of another instruction so that it
+    // takes a two-byte unsigned index instead of a one-byte one. These don't get a single-byte
+    // discriminant of their own since 0xc4 is a prefix - see the `0xc4` match arm in `next_op`,
+    // which reads the widened opcode and dispatches to the matching variant below.
+    /// Load int from local variable, using a wide (u16) index.
+    WideIload(u16),
+    #[decode(wide(op = 0x16))]
+    /// Load long from local variable, using a wide (u16) index.
+    WideLload(u16),
+    /// Load float from local variable, using a wide (u16) index.
+    #[decode(wide(op = 0x17))]
+    WideFload(u16),
+    /// Load double from local variable, using a wide (u16) index.
+    #[decode(wide(op = 0x18))]
+    WideDload(u16),
+    /// Load reference from local variable, using a wide (u16) index.
+    #[decode(wide(op = 0x19))]
+    WideAload(u16),
+    /// Store int into local variable, using a wide (u16) index.
+    #[decode(wide(op = 0x36))]
+    WideIStore(u16),
+    /// Store long into local variable, using a wide (u16) index.
+    #[decode(wide(op = 0x37))]
+    WideLStore(u16),
+    /// Store float into local variable, using a wide (u16) index.
+    #[decode(wide(op = 0x38))]
+    WideFStore(u16),
+    /// Store double into local variable, using a wide (u16) index.
+    #[decode(wide(op = 0x39))]
+    WideDStore(u16),
+    /// Store reference into local variable, using a wide (u16) index.
+    #[decode(wide(op = 0x3a))]
+    WideAStore(u16),
+    /// Increment local variable by constant, using a wide (u16) index and a wide (i16) constant.
+    #[decode(wide(op = 0x84))]
+    WideIinc(u16, i16),
+
+    #[decode(invalid)]
     Invalid(u8),
+}
+
+impl OpCode {
+    #[inline(always)]
+    /// Handles some cases macro cannot
+    fn custom_decode(op: u8, reader: &mut ClassByteReader, pc: &mut u16) -> Option<Self> {
+        match op {
+            0x10 => {
+                let byte = reader.decode::<u8>().ok()? as i8;
+                *pc += size_of::<u8>() as u16;
+                Some(OpCode::Bipush(byte))
+            }
+            // TODO: too lazy for iconst<n>
+            0x2 => Some(OpCode::Bipush(-1)),
+            0x3..=0x8 => Some(OpCode::Bipush((op - 0x3) as i8)),
+            _ => Some(OpCode::Invalid(op)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -202,97 +448,7 @@ impl<'a> Instructions<'a> {
         let op = reader.read_u8().ok()?;
         self.pc += 1;
 
-        macro_rules! opnd {
-            ($t: ty) => {{
-                let Ok(opr): Result<$t, _> = reader.decode() else {
-                    return Some(OpCode::Invalid(op));
-                };
-
-                self.pc += size_of::<$t>() as u16;
-                opr
-            }};
-        }
-
-        match op {
-            0x10 => {
-                let byte = opnd!(u8) as i8;
-                Some(OpCode::Bipush(byte))
-            }
-            // TODO: Too lazy for iconst<n>
-            0x2 => Some(OpCode::Bipush(-1)),
-            0x3..=0x8 => Some(OpCode::Bipush((op - 0x3) as i8)),
-            0x15 => {
-                let idx = opnd!(u8);
-                Some(OpCode::Iload(idx))
-            }
-            0x19 => Some(OpCode::Aload(opnd!(u8))),
-            0x3a => Some(OpCode::AStore(opnd!(u8))),
-            0x1a | 0x1b | 0x1c | 0x1d => {
-                // TODO: too lazy to do iload<n>
-                let idx = op - 0x1a;
-                Some(OpCode::Iload(idx))
-            }
-            0x2a | 0x2b | 0x2c | 0x2d => {
-                let idx = op - 0x2a;
-                Some(OpCode::Aload(idx))
-            }
-            0x36 => {
-                let idx = opnd!(u8);
-                Some(OpCode::IStore(idx))
-            }
-            0x3b | 0x3c | 0x3d | 0x3e => {
-                let idx = op - 0x3b;
-                // TODO: too lazy to do istore<n>
-                Some(OpCode::IStore(idx))
-            }
-            0x4b | 0x4c | 0x4d | 0x4e => {
-                let idx = op - 0x4b;
-                Some(OpCode::AStore(idx))
-            }
-            0x84 => Some(OpCode::Iinc(opnd!(u8), opnd!(u8) as i8)),
-            0x68 => Some(OpCode::Imul),
-            0x6c => Some(OpCode::Idiv),
-            0x74 => Some(OpCode::Ineg),
-            0x64 => Some(OpCode::Isub),
-            0x60 => Some(OpCode::Iadd),
-            0x9f => {
-                let pc = opnd!(u16) as i16;
-                Some(OpCode::IfIcmpEq(pc))
-            }
-            0xa0 => {
-                let pc = opnd!(u16) as i16;
-                Some(OpCode::IfIcmpNe(pc))
-            }
-            0x99 => {
-                let pc = opnd!(u16) as i16;
-                Some(OpCode::IfEq(pc))
-            }
-            0x9a => {
-                let pc = opnd!(u16) as i16;
-                Some(OpCode::IfNe(pc))
-            }
-            0xa7 => {
-                let pc = opnd!(u16) as i16;
-                Some(OpCode::Goto(pc))
-            }
-            0xac => Some(OpCode::IReturn),
-            0xb6 => Some(OpCode::InvokeVirtual(opnd!(u16))),
-            0xb7 => Some(OpCode::InvokeSpecial(opnd!(u16))),
-            0xb8 => Some(OpCode::InvokeStatic(opnd!(u16))),
-            0xb1 => Some(OpCode::Return),
-            0xb3 => Some(OpCode::Putstatic(opnd!(u16))),
-            0xb2 => Some(OpCode::Getstatic(opnd!(u16))),
-            0xb4 => Some(OpCode::GetField(opnd!(u16))),
-            0xb5 => Some(OpCode::PutField(opnd!(u16))),
-            0xbb => Some(OpCode::New(opnd!(u16))),
-            0x59 => Some(OpCode::Dup),
-            0x5a => Some(OpCode::DupX1),
-            0x5b => Some(OpCode::DupX2),
-            0x5c => Some(OpCode::Dup2),
-            0x5d => Some(OpCode::Dup2X1),
-            0x5e => Some(OpCode::Dup2X2),
-            _ => Some(OpCode::Invalid(op)),
-        }
+        OpCode::decode(op, &mut reader, &mut self.pc)
     }
 }
 

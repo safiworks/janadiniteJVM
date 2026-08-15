@@ -111,6 +111,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hybrid-rc"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ec323de9ef1781124ababe85b0ef35f1266cda8d46e957ab84a041038d6266f"
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -121,6 +127,7 @@ name = "janadinite-parse"
 version = "0.1.0"
 dependencies = [
  "bitflags",
+ "macros",
  "simd_cesu8",
 ]
 
@@ -129,8 +136,18 @@ name = "janadinite-vm"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "hybrid-rc",
  "janadinite-parse",
  "rustc-hash",
+]
+
+[[package]]
+name = "macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

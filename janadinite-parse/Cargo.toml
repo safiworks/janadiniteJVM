@@ -9,6 +9,7 @@ description = "A no-std rust JVM decoding and encoding library"
 [dependencies]
 bitflags = "2.13.1"
 simd_cesu8 = { version = "1.2.0", default-features = false }
+macros = { path = "../macros" }
 
 [features]
 std = []

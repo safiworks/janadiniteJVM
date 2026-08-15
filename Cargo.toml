@@ -7,9 +7,10 @@ license = "MIT"
 description = "A JIT powered JVM and JVM library wrote in rust"
 
 [workspace]
-members = ["janadinite-parse"]
+members = ["janadinite-parse", "macros"]
 
 [dependencies]
 clap = { version = "4.6.6", features = ["derive"] }
+hybrid-rc = "0.6.0"
 janadinite-parse = { path = "janadinite-parse" }
 rustc-hash = { version = "2.1.3", default-features = false }
