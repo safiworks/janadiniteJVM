@@ -743,10 +743,36 @@ impl VM {
             }};
         }
 
+        #[inline(always)]
+        fn ldc(
+            pool: &VMConstantPool,
+            idx: u16,
+            context: &mut ThreadContext,
+        ) -> Result<(), VMError> {
+            match pool.get_entry(idx) {
+                Some(VMConstantPoolEntry::Float(f)) => {
+                    context.fpush(*f);
+                    Ok(())
+                }
+                Some(VMConstantPoolEntry::Int(i)) => {
+                    context.ipush(*i);
+                    Ok(())
+                }
+                _ => Err(VMError::InvalidConstantPoolEntry(idx)),
+            }
+        }
         while let Some(opcode) = instr.next_op() {
             match opcode {
                 OpCode::Lconst0 => context.lpush(0),
                 OpCode::Lconst1 => context.lpush(1),
+                OpCode::Fconst0 => context.fpush(0.),
+                OpCode::Fconst1 => context.fpush(1.),
+                OpCode::Fconst2 => context.fpush(2.),
+                OpCode::Dconst0 => context.dpush(0.),
+                OpCode::Dconst1 => context.dpush(1.),
+
+                OpCode::Ldc(idx) => ldc(class.constant_pool(), idx as u16, context)?,
+                OpCode::LdcW(idx) => ldc(class.constant_pool(), idx, context)?,
                 OpCode::Ldc2W(ref_idx) => match class.constant_pool().get_entry(ref_idx) {
                     Some(VMConstantPoolEntry::Double(d)) => {
                         context.dpush(*d);
@@ -1008,6 +1034,14 @@ impl VM {
                     let v = context.ipop()?;
                     context.lpush(v as i64);
                 }
+                OpCode::I2f => {
+                    let v = context.ipop()?;
+                    context.fpush(v as f32);
+                }
+                OpCode::I2d => {
+                    let v = context.ipop()?;
+                    context.dpush(v as f64);
+                }
                 OpCode::Lcmp => {
                     let v2 = context.lpop()?;
                     let v1 = context.lpop()?;
@@ -1016,6 +1050,44 @@ impl VM {
                         std::cmp::Ordering::Equal => 0,
                         std::cmp::Ordering::Greater => 1,
                         std::cmp::Ordering::Less => -1,
+                    };
+
+                    context.ipush(res);
+                }
+                OpCode::Fcmpg | OpCode::Fcmpl => {
+                    let v2 = context.fpop()?;
+                    let v1 = context.fpop()?;
+
+                    let res = match v1.partial_cmp(&v2) {
+                        Some(std::cmp::Ordering::Equal) => 0,
+                        Some(std::cmp::Ordering::Greater) => 1,
+                        Some(std::cmp::Ordering::Less) => -1,
+                        None => {
+                            if matches!(opcode, OpCode::Fcmpl) {
+                                -1
+                            } else {
+                                1
+                            }
+                        }
+                    };
+
+                    context.ipush(res);
+                }
+                OpCode::Dcmpg | OpCode::Dcmpl => {
+                    let v2 = context.dpop()?;
+                    let v1 = context.dpop()?;
+
+                    let res = match v1.partial_cmp(&v2) {
+                        Some(std::cmp::Ordering::Equal) => 0,
+                        Some(std::cmp::Ordering::Greater) => 1,
+                        Some(std::cmp::Ordering::Less) => -1,
+                        None => {
+                            if matches!(opcode, OpCode::Dcmpl) {
+                                -1
+                            } else {
+                                1
+                            }
+                        }
                     };
 
                     context.ipush(res);

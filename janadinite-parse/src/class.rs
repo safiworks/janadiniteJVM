@@ -56,6 +56,29 @@ pub enum OpCode {
     Lconst0 = 0x9,
     /// Push long constant 1
     Lconst1 = 0xa,
+    /// Push float 0
+    Fconst0 = 0xb,
+    /// Push float 1
+    Fconst1 = 0xc,
+    /// Push float 2
+    Fconst2 = 0xd,
+    /// Push double 0
+    Dconst0 = 0xe,
+    /// Push double 1
+    Dconst1 = 0xf,
+    /// Push item from run-time constant pool
+    /// The index is an unsigned byte that must be a valid index into the run-time constant pool of the current class (§2.6). The run-time constant pool entry at index either must be a run-time constant of type int or float, or a reference to a string literal, or a symbolic reference to a class, method type, or method handle (§5.1).
+    ///
+    /// If the run-time constant pool entry is a run-time constant of type int or float, the numeric value of that run-time constant is pushed onto the operand stack as an int or float, respectively.
+    ///
+    /// Otherwise, if the run-time constant pool entry is a reference to an instance of class String representing a string literal (§5.1), then a reference to that instance, value, is pushed onto the operand stack.
+    ///
+    /// Otherwise, if the run-time constant pool entry is a symbolic reference to a class (§5.1), then the named class is resolved (§5.4.3.1) and a reference to the Class object representing that class, value, is pushed onto the operand stack.
+    ///
+    /// Otherwise, the run-time constant pool entry must be a symbolic reference to a method type or a method handle (§5.1). The method type or method handle is resolved (§5.4.3.5) and a reference to the resulting instance of java.lang.invoke.MethodType or java.lang.invoke.MethodHandle, value, is pushed onto the operand stack
+    Ldc(u8) = 0x12,
+    /// Wide version of [`Self::Ldc`].
+    LdcW(u16) = 0x13,
     /// Push long or double from run-time constant pool (wide index)
     Ldc2W(u16) = 0x14,
     /// Load int from local variable
@@ -274,8 +297,42 @@ pub enum OpCode {
     ///
     ///  The value on the top of the operand stack must be of type int. It is popped from the operand stack and sign-extended to a long result. That result is pushed onto the operand stack.
     I2l = 0x85,
+    /// Convert int to float
+    I2f = 0x86,
+    /// Convert int to double
+    I2d = 0x87,
     /// Branch always/
     Goto(i16) = 0xa7,
+    /// Compare float
+    ///
+    ///
+    /// Both value1 and value2 must be of type float. The values are popped from the operand stack and undergo value set conversion (§2.8.3), resulting in value1' and value2'. A floating-point comparison is performed:
+    ///
+    /// If value1' is greater than value2', the int value 1 is pushed onto the operand stack.
+    ///
+    ///
+    /// Otherwise, if value1' is equal to value2', the int value 0 is pushed onto the operand stack.
+    ///
+    ///
+    /// Otherwise, if value1' is less than value2', the int value -1 is pushed onto the operand stack.
+    ///
+    ///  Otherwise, at least one of value1' or value2' is NaN. The fcmpg instruction pushes the int value 1 onto the operand stack and the fcmpl instruction pushes the int value -1 onto the operand stack.
+    Fcmpg = 0x96,
+    /// Same a [`Self::Fcmpg`] but on NaN pushes -1.
+    Fcmpl = 0x95,
+    /// Compare double
+    ///
+    ///
+    /// If value1' is greater than value2', the int value 1 is pushed onto the operand stack.
+    ///
+    /// Otherwise, if value1' is equal to value2', the int value 0 is pushed onto the operand stack.
+    ///
+    /// Otherwise, if value1' is less than value2', the int value -1 is pushed onto the operand stack.
+    ///
+    /// Otherwise, at least one of value1' or value2' is NaN. The dcmpg instruction pushes the int value 1 onto the operand stack and the dcmpl instruction pushes the int value -1 onto the operand stack.
+    Dcmpg = 0x98,
+    /// Same as [`Self::Dcmpg`] but on NaN pushes -1.
+    Dcmpl = 0x97,
     /// Branch if int comparison succeeds.
     ///
     /// Both value1 and value2 must be of type int. They are both popped from the operand stack and compared. All comparisons are signed. The results of the comparison are as follows:
