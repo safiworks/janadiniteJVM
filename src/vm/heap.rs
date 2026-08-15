@@ -14,7 +14,7 @@ use rustc_hash::FxBuildHasher;
 
 use crate::vm::{JVMSlot, VMClass};
 
-const GC_THRESHOLD: [usize; 1] = [20];
+const GC_THRESHOLD: usize = 20;
 
 static SHOULD_STOP_THE_WORLD: AtomicBool = AtomicBool::new(false);
 
@@ -96,8 +96,8 @@ pub fn safepoint() {
 #[derive(Debug)]
 pub struct Heap {
     // NOTE: dropping plain ObjectRef could result on a deadlock, convert into Arc first...
-    generations: [HashSet<ObjectRef, FxBuildHasher>; 1],
-    alloc_count: [usize; 1],
+    objects: HashSet<ObjectRef, FxBuildHasher>,
+    alloc_count: usize,
     unreachable: Vec<ObjectRef>,
     heap_threads: usize,
     parked_threads: usize,
@@ -106,10 +106,10 @@ pub struct Heap {
 impl Heap {
     pub const fn new() -> Self {
         Self {
-            generations: [const { HashSet::with_hasher(rustc_hash::FxBuildHasher) }; 1],
+            objects: const { HashSet::with_hasher(rustc_hash::FxBuildHasher) },
             unreachable: Vec::new(),
             heap_threads: 0,
-            alloc_count: [0; 1],
+            alloc_count: 0,
             parked_threads: 0,
         }
     }
@@ -119,92 +119,87 @@ impl Heap {
             self.heap_threads, self.parked_threads,
             "Called without stop-the-world happening first"
         );
-        for i in 0..self.generations.len() {
-            let gene = &mut self.generations[i];
-            let threshold = GC_THRESHOLD[i];
+        let all_objects = &mut self.objects;
+        let threshold = GC_THRESHOLD;
 
-            if self.alloc_count[i] >= threshold {
-                for obj in gene.iter() {
-                    unsafe { *obj.gc_refs.get() = Arc::strong_count(&obj.0) - 1 };
-                }
-
-                for obj in gene.iter() {
-                    for data in &obj.data {
-                        // Safety: world should be stopped first...
-                        unsafe {
-                            (*data.get()).with_object(|child| *child.gc_refs.get() -= 1);
-                        }
-                    }
-                }
-
-                for obj in gene.extract_if(|obj| unsafe { *obj.gc_refs.get() } == 0) {
-                    unsafe { *obj.gc_refs.get() = usize::MAX };
-                    self.unreachable.push(obj);
-                }
-
-                let mut found_refs = false;
-                for obj in gene.iter() {
-                    for data in &obj.data {
-                        // Safety: world should be stopped first...
-                        unsafe {
-                            (*data.get()).with_object(|child| {
-                                if *child.gc_refs.get() == usize::MAX {
-                                    found_refs = true;
-                                    *child.gc_refs.get() = 1;
-                                }
-                            });
-                        }
-                    }
-                }
-
-                while found_refs {
-                    found_refs = false;
-                    for obj in self.unreachable.iter() {
-                        if unsafe { *obj.gc_refs.get() != usize::MAX } {
-                            for data in &obj.data {
-                                unsafe {
-                                    (*data.get()).with_object(|child| {
-                                        if *child.gc_refs.get() == usize::MAX {
-                                            found_refs = true;
-                                            *child.gc_refs.get() = 1;
-                                        }
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-
-                for obj in self.unreachable.drain(..) {
-                    if unsafe { *obj.gc_refs.get() } != usize::MAX {
-                        gene.insert(obj);
-                    } else {
-                        let arc = obj.into_arc();
-
-                        for data in &arc.data {
-                            if let Some(obj) =
-                                core::mem::replace(unsafe { &mut *data.get() }, JVMSlot::null())
-                                    .into_object()
-                            {
-                                drop(obj.into_arc());
-                            }
-                        }
-
-                        drop(arc);
-                    }
-                }
-
-                self.alloc_count[i] = 0;
+        if self.alloc_count >= threshold {
+            for obj in all_objects.iter() {
+                unsafe { *obj.gc_refs.get() = Arc::strong_count(&obj.0) - 1 };
             }
+
+            for obj in all_objects.iter() {
+                for data in &obj.data {
+                    // Safety: world should be stopped first...
+                    unsafe {
+                        (*data.get()).with_object(|child| *child.gc_refs.get() -= 1);
+                    }
+                }
+            }
+
+            for obj in all_objects.extract_if(|obj| unsafe { *obj.gc_refs.get() } == 0) {
+                unsafe { *obj.gc_refs.get() = usize::MAX };
+                self.unreachable.push(obj);
+            }
+
+            let mut found_refs = false;
+            for obj in all_objects.iter() {
+                for data in &obj.data {
+                    // Safety: world should be stopped first...
+                    unsafe {
+                        (*data.get()).with_object(|child| {
+                            if *child.gc_refs.get() == usize::MAX {
+                                found_refs = true;
+                                *child.gc_refs.get() = 1;
+                            }
+                        });
+                    }
+                }
+            }
+
+            while found_refs {
+                found_refs = false;
+                for obj in self.unreachable.iter() {
+                    if unsafe { *obj.gc_refs.get() != usize::MAX } {
+                        for data in &obj.data {
+                            unsafe {
+                                (*data.get()).with_object(|child| {
+                                    if *child.gc_refs.get() == usize::MAX {
+                                        found_refs = true;
+                                        *child.gc_refs.get() = 1;
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            for obj in self.unreachable.drain(..) {
+                if unsafe { *obj.gc_refs.get() } != usize::MAX {
+                    all_objects.insert(obj);
+                } else {
+                    let arc = obj.into_arc();
+
+                    for data in &arc.data {
+                        if let Some(obj) =
+                            core::mem::replace(unsafe { &mut *data.get() }, JVMSlot::null())
+                                .into_object()
+                        {
+                            drop(obj.into_arc());
+                        }
+                    }
+
+                    drop(arc);
+                }
+            }
+
+            self.alloc_count = 0;
         }
     }
 
     pub fn set_gc_flags(&self) {
-        for (i, _) in self.generations.iter().enumerate() {
-            if self.alloc_count[i] >= GC_THRESHOLD[i] {
-                SHOULD_STOP_THE_WORLD.store(true, Ordering::Release);
-                break;
-            }
+        if self.alloc_count >= GC_THRESHOLD {
+            SHOULD_STOP_THE_WORLD.store(true, Ordering::Release);
         }
     }
 
@@ -218,8 +213,8 @@ impl Heap {
             data,
             class,
         });
-        self.generations[0].insert(ObjectRef(arc_obj.clone()));
-        self.alloc_count[0] += 1;
+        self.objects.insert(ObjectRef(arc_obj.clone()));
+        self.alloc_count += 1;
 
         self.set_gc_flags();
         unsafe { ObjectRef::from_ptr(Arc::into_raw(arc_obj)) }
@@ -289,12 +284,11 @@ impl Drop for ObjectRef {
                 .expect("Failed to acquire lock on heap while dealllocting object");
 
             if Arc::strong_count(&self.0) == 2 {
-                for g in heap.generations.iter_mut() {
-                    if let Some(removed) = g.take(self) {
-                        drop(removed.into_arc());
-                        break;
-                    }
-                }
+                let Some(removed) = heap.objects.take(self) else {
+                    panic!("Failed to deallocate an object")
+                };
+                drop(removed.into_arc());
+                heap.alloc_count -= 1;
             }
         }
     }
