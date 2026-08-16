@@ -618,12 +618,31 @@ impl VM {
 
                     let (class, method) =
                         self.with_class_or_load_by_name(&*unresolved_class, |class| {
-                            class
-                                .method_by_name(&*unresolved_name, Some(&*unresolved_descriptor))
-                                .map(|m| (class.clone(), m.id()))
-                                .ok_or_else(|| {
-                                    VMError::NoSuchMethodInClass(String::from(&**unresolved_name))
-                                })
+                            let mut current_search_in = class;
+                            let mut found;
+                            loop {
+                                found = current_search_in
+                                    .method_by_name(
+                                        &*unresolved_name,
+                                        Some(&*unresolved_descriptor),
+                                    )
+                                    .map(|m| (current_search_in.clone(), m.id()));
+
+                                if found.is_some() {
+                                    break;
+                                }
+
+                                if let Some(supe) = current_search_in.super_class() {
+                                    current_search_in = supe;
+                                    continue;
+                                }
+
+                                break;
+                            }
+
+                            found.ok_or_else(|| {
+                                VMError::NoSuchMethodInClass(String::from(&**unresolved_name))
+                            })
                         })?;
 
                     let (class, method) = resolved.get_or_init(|| (class, method));
@@ -666,18 +685,28 @@ impl VM {
 
                     let (class, field) =
                         self.with_class_or_load_by_name(&*unresolved_class, |class| {
-                            class
-                                .field_by_name(&*unresolved_name)
-                                .map(|f| (class.clone(), f.off()))
-                                .or_else(|| {
-                                    class.super_class().and_then(|supe| {
-                                        supe.field_by_name(&*unresolved_name)
-                                            .map(|f| (supe.clone(), f.off()))
-                                    })
-                                })
-                                .ok_or_else(|| {
-                                    VMError::NoSuchFieldInClass(String::from(&**unresolved_name))
-                                })
+                            let mut current_search_in = class;
+                            let mut found;
+                            loop {
+                                found = current_search_in
+                                    .field_by_name(&*unresolved_name)
+                                    .map(|f| (current_search_in.clone(), f.off()));
+
+                                if found.is_some() {
+                                    break;
+                                }
+
+                                if let Some(supe) = current_search_in.super_class() {
+                                    current_search_in = supe;
+                                    continue;
+                                }
+
+                                break;
+                            }
+
+                            found.ok_or_else(|| {
+                                VMError::NoSuchFieldInClass(String::from(&**unresolved_name))
+                            })
                         })?;
 
                     let (class, field) = resolved.get_or_init(|| (class, field));
