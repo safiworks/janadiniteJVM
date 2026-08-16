@@ -20,23 +20,25 @@ pub enum MethodID {
     Vtable(u16),
 }
 
+#[repr(align(32))]
 pub enum VMConstantPoolEntry {
     UTF8(Arc<str>),
     Class(Arc<str>),
+    NameAndType {
+        name: u16,
+        descriptor: u16,
+    },
     MethodRef {
-        unresolved_name: Arc<str>,
-        unresolved_class: Arc<str>,
-        unresolved_descriptor: Arc<str>,
-
+        class: u16,
+        name_and_desc: u16,
         resolved: OnceLock<(Arc<VMClass>, MethodID)>,
     },
     // Methods within the same class
     ResolvedMethod(MethodID),
     ResolvedField(FieldOff),
     FiledRef {
-        unresolved_name: Arc<str>,
-        unresolved_class: Arc<str>,
-        unresolved_descriptor: Arc<str>,
+        class: u16,
+        name_and_desc: u16,
         resolved: OnceLock<(Arc<VMClass>, FieldOff)>,
     },
     Int(i32),
@@ -50,27 +52,20 @@ impl Debug for VMConstantPoolEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             VMConstantPoolEntry::UTF8(s) => write!(f, "UTF8({})", s),
-            VMConstantPoolEntry::Class(s) => write!(f, "Class({})", s),
+            VMConstantPoolEntry::Class(name) => write!(f, "Class({name})"),
+            VMConstantPoolEntry::NameAndType { name, descriptor } => {
+                write!(f, "NameAndType({name}, {descriptor})")
+            }
             VMConstantPoolEntry::MethodRef {
-                unresolved_name,
-                unresolved_class,
-                unresolved_descriptor,
+                class,
+                name_and_desc,
                 ..
-            } => write!(
-                f,
-                "MethodRef({}/{}/{})",
-                unresolved_name, unresolved_class, unresolved_descriptor
-            ),
+            } => write!(f, "MethodRef({class}, {name_and_desc})",),
             VMConstantPoolEntry::FiledRef {
-                unresolved_name,
-                unresolved_class,
-                unresolved_descriptor,
+                class,
+                name_and_desc,
                 ..
-            } => write!(
-                f,
-                "FiledRef({}/{}/{})",
-                unresolved_name, unresolved_class, unresolved_descriptor
-            ),
+            } => write!(f, "FiledRef({class}, {name_and_desc})",),
             VMConstantPoolEntry::ResolvedMethod(m) => write!(f, "ResolvedMethod({:?})", m),
             VMConstantPoolEntry::ResolvedField(fi) => write!(f, "ResolvedField({:?})", fi),
 
@@ -89,6 +84,35 @@ pub struct VMConstantPool {
 }
 
 impl VMConstantPool {
+    pub fn get_name_and_type(&self, index: u16) -> Option<(&Arc<str>, &Arc<str>)> {
+        match self.get_entry(index)? {
+            VMConstantPoolEntry::NameAndType { name, descriptor } => {
+                let VMConstantPoolEntry::UTF8(name) = self
+                    .get_entry(*name)
+                    .expect("Bad name index in NameAndType")
+                else {
+                    panic!("NameAndType name didn't point to UTF8 entry.")
+                };
+
+                let VMConstantPoolEntry::UTF8(desc) = self
+                    .get_entry(*descriptor)
+                    .expect("Bad descriptor index in NameAndType")
+                else {
+                    panic!("NameAndType descriptor didn't point to UTF8 entry.")
+                };
+
+                Some((&name, &desc))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn get_class(&self, index: u16) -> Option<&Arc<str>> {
+        match self.get_entry(index)? {
+            VMConstantPoolEntry::Class(name) => Some(name),
+            _ => None,
+        }
+    }
     pub fn get_entry(&self, index: u16) -> Option<&VMConstantPoolEntry> {
         self.entries.get(index as usize)
     }
@@ -104,11 +128,22 @@ impl VMConstantPool {
         for entry in entries {
             let resolved = match entry {
                 ConstantPoolEntry::Utf8 { string } => VMConstantPoolEntry::UTF8(string.clone()),
-                ConstantPoolEntry::Class { name_index } => {
-                    let class_name =
-                        class::get_const!(UTF8 entries, *name_index, "Class class name");
+                ConstantPoolEntry::NameAndType {
+                    name_index,
+                    descriptor_index,
+                } => {
+                    class::get_const!(UTF8 entries, *name_index, "NameAndType name");
+                    class::get_const!(UTF8 entries, *descriptor_index, "NameAndType descriptor");
 
-                    VMConstantPoolEntry::Class(class_name.clone())
+                    VMConstantPoolEntry::NameAndType {
+                        name: *name_index,
+                        descriptor: *descriptor_index,
+                    }
+                }
+                ConstantPoolEntry::Class { name_index } => {
+                    let name = class::get_const!(UTF8 entries, *name_index, "Class class name");
+
+                    VMConstantPoolEntry::Class(name.clone())
                 }
                 ConstantPoolEntry::Integer { bytes } => VMConstantPoolEntry::Int(*bytes as i32),
                 ConstantPoolEntry::Float { value } => VMConstantPoolEntry::Float(*value),
@@ -155,9 +190,8 @@ impl VMConstantPool {
                             VMConstantPoolEntry::ResolvedMethod(meth.id())
                         } else {
                             VMConstantPoolEntry::MethodRef {
-                                unresolved_name: name.clone(),
-                                unresolved_class: class_name.clone(),
-                                unresolved_descriptor: descriptor.clone(),
+                                class: *class_index,
+                                name_and_desc: *name_and_type_index,
                                 resolved: OnceLock::new(),
                             }
                         }
@@ -170,9 +204,8 @@ impl VMConstantPool {
                             VMConstantPoolEntry::ResolvedField(field.idx)
                         } else {
                             VMConstantPoolEntry::FiledRef {
-                                unresolved_name: name.clone(),
-                                unresolved_class: class_name.clone(),
-                                unresolved_descriptor: descriptor.clone(),
+                                class: *class_index,
+                                name_and_desc: *name_and_type_index,
                                 resolved: OnceLock::new(),
                             }
                         }
@@ -385,33 +418,46 @@ impl VMClass {
             }
         }
 
+        let mut fields = Vec::new();
         let mut curr_off = 0;
-        let fields: Box<[VMField]> = class
-            .fields
-            .into_iter()
-            .enumerate()
-            .map(|(idx, f)| {
-                let is_static = f.access_flags().contains(JVMAccessFlag::ACC_STATIC);
-                if !is_static {
-                    let f = VMField {
-                        idx: idx as u16,
-                        data: FieldData::Normal(curr_off),
-                        field: f,
-                    };
 
-                    curr_off += f.slot_count() as u32;
-                    f
-                } else {
-                    let f = VMField {
-                        idx: idx as u16,
-                        data: FieldData::Static([const { UnsafeCell::new(JVMSlot::null()) }; 2]),
-                        field: f,
-                    };
+        if let Some(ref supe) = super_class {
+            for field in &supe.fields {
+                if let FieldData::Normal(off) = field.data {
+                    curr_off = off + field.slot_count() as u32;
 
-                    f
+                    fields.push(VMField {
+                        data: FieldData::Normal(off),
+                        idx: field.idx,
+                        field: field.field.clone(),
+                    });
                 }
-            })
-            .collect::<Box<[_]>>();
+            }
+        }
+
+        for (idx, f) in class.fields.into_iter().enumerate() {
+            let is_static = f.access_flags().contains(JVMAccessFlag::ACC_STATIC);
+            let new_f = if !is_static {
+                let f = VMField {
+                    idx: idx as u16,
+                    data: FieldData::Normal(curr_off),
+                    field: f,
+                };
+
+                curr_off += f.slot_count() as u32;
+                f
+            } else {
+                let f = VMField {
+                    idx: idx as u16,
+                    data: FieldData::Static([const { UnsafeCell::new(JVMSlot::null()) }; 2]),
+                    field: f,
+                };
+
+                f
+            };
+
+            fields.push(new_f);
+        }
 
         let constant_pool = VMConstantPool::from_unresolved(
             &class.constant_pool,
@@ -422,7 +468,7 @@ impl VMClass {
         Ok(Self {
             name: class.this_name,
             super_class,
-            fields,
+            fields: fields.into_boxed_slice(),
             vtable: vtable.into_boxed_slice(),
             static_vtable: static_vtable.into_boxed_slice(),
             constant_pool,

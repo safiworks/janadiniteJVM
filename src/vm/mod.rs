@@ -12,7 +12,7 @@ pub(crate) mod heap;
 pub use class::*;
 use janadinite_parse::class::{Class, JVMAccessFlag, JVMCode, OpCode};
 
-use crate::vm::heap::ObjectRef;
+use crate::vm::heap::{ObjectKind, ObjectRef};
 
 #[derive(Debug, PartialEq, Eq)]
 #[repr(transparent)]
@@ -579,15 +579,12 @@ impl VM {
         ref_idx: u16,
         f: impl FnOnce(&Arc<VMClass>) -> Result<R, VMError>,
     ) -> Result<R, VMError> {
-        let entry = this_class
+        let name = this_class
             .constant_pool()
-            .get_entry(ref_idx)
+            .get_class(ref_idx)
             .ok_or(VMError::InvalidConstantPoolEntry(ref_idx))?;
 
-        match entry {
-            VMConstantPoolEntry::Class(name) => self.with_class_or_load_by_name(&*name, f),
-            _ => Err(VMError::InvalidConstantPoolEntry(ref_idx)),
-        }
+        self.with_class_or_load_by_name(&*name, f)
     }
 
     fn get_method_or_resolve<'c>(
@@ -602,15 +599,23 @@ impl VM {
 
         match entry {
             VMConstantPoolEntry::MethodRef {
+                class,
+                name_and_desc,
                 resolved,
-                unresolved_class,
-                unresolved_name,
-                unresolved_descriptor,
                 ..
             } => {
                 if let Some((class, method)) = resolved.get() {
                     Ok((class, *method))
                 } else {
+                    let unresolved_class = this_class
+                        .constant_pool()
+                        .get_class(*class)
+                        .expect("MethodRef points to invalid class");
+                    let (unresolved_name, unresolved_descriptor) = this_class
+                        .constant_pool()
+                        .get_name_and_type(*name_and_desc)
+                        .expect("MethodRef points to invalid NameAndType");
+
                     let (class, method) =
                         self.with_class_or_load_by_name(&*unresolved_class, |class| {
                             class
@@ -642,14 +647,23 @@ impl VM {
 
         match entry {
             VMConstantPoolEntry::FiledRef {
+                class,
+                name_and_desc,
                 resolved,
-                unresolved_class,
-                unresolved_name,
                 ..
             } => {
                 if let Some((class, method)) = resolved.get() {
                     Ok((class, *method))
                 } else {
+                    let unresolved_class = this_class
+                        .constant_pool()
+                        .get_class(*class)
+                        .expect("MethodRef points to invalid class");
+                    let (unresolved_name, _) = this_class
+                        .constant_pool()
+                        .get_name_and_type(*name_and_desc)
+                        .expect("MethodRef points to invalid NameAndType");
+
                     let (class, field) =
                         self.with_class_or_load_by_name(&*unresolved_class, |class| {
                             class
@@ -815,47 +829,32 @@ impl VM {
                     let method = meth_class.method_by_id(method_id).unwrap();
                     let args =
                         context.pop_create_args(method.args_size() as u16 + 1 /* object */)?;
+                    let class = args[0]
+                        .with_object(|object| {
+                            let ObjectKind::Instance { ref class } = object.kind else {
+                                return Err(VMError::NotAnObject);
+                            };
 
-                    if args[0]
-                        .with_object(|obj| !core::ptr::eq(meth_class, Arc::as_ptr(&obj.class)))
-                        .ok_or(VMError::NotAnObject)?
-                    {
-                        let object = args[0].object_clone().unwrap();
-                        // FIXME: we should build a vtable
-                        let obj_meth = object
-                            .class
-                            .method_by_name(method.name(), Some(method.raw_descriptor()))
-                            .expect("Couldn't search for virtual method");
+                            Ok(class.clone())
+                        })
+                        .ok_or(VMError::NotAnObject)??;
 
-                        let code = obj_meth.code().expect("FIXME: Handle methods without code");
-                        context.finish_push_frame(
-                            ref_idx,
-                            code.max_locals(),
-                            code.max_stack(),
-                            method.args_size() as u16 + 1,
-                        );
+                    let obj_meth = class
+                        .method_by_name(method.name(), Some(method.raw_descriptor()))
+                        .expect("Couldn't search for virtual method");
 
-                        let result = self.run_code(&object.class, context, &code)?;
-                        context.pop_frame();
-                        if let Some(result) = result {
-                            context.push_value(result);
-                        }
-                    } else {
-                        /* normal invokespecial */
-                        let code = method.code().expect("TODO: methods without code");
+                    let code = obj_meth.code().expect("FIXME: Handle methods without code");
+                    context.finish_push_frame(
+                        ref_idx,
+                        code.max_locals(),
+                        code.max_stack(),
+                        method.args_size() as u16 + 1,
+                    );
 
-                        context.finish_push_frame(
-                            ref_idx,
-                            code.max_stack(),
-                            code.max_locals(),
-                            method.args_size() as u16 + 1,
-                        );
-
-                        let result = self.run_code(meth_class, context, &code)?;
-                        context.pop_frame();
-                        if let Some(result) = result {
-                            context.push_value(result);
-                        }
+                    let result = self.run_code(&class, context, &code)?;
+                    context.pop_frame();
+                    if let Some(result) = result {
+                        context.push_value(result);
                     }
                 }
                 OpCode::Getstatic(ref_idx) => {

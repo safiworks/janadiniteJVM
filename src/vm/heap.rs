@@ -3,6 +3,7 @@ use std::{
     collections::HashSet,
     hash::Hash,
     mem::ManuallyDrop,
+    num::NonZero,
     ops::Deref,
     sync::{
         Arc, Condvar, Mutex, MutexGuard,
@@ -59,14 +60,75 @@ pub fn unregister_thread() {
     }
 }
 
-/// Safety: thread has to be registered with [`register_thread`] first.
-pub unsafe fn allocate(class: Arc<VMClass>) -> ObjectRef {
+#[inline(always)]
+unsafe fn allocate_inner(kind: ObjectKind, slots: usize) -> ObjectRef {
     let mut heap = HEAP.lock().expect("Failed to acquire lock on heap");
 
     if SHOULD_STOP_THE_WORLD.load(Ordering::Relaxed) {
         heap = stop_the_world_inner(heap);
     }
-    heap.allocate(class)
+    heap.allocate(kind, slots)
+}
+
+/// Safety: thread has to be registered with [`register_thread`] first.
+pub unsafe fn allocate(class: Arc<VMClass>) -> ObjectRef {
+    let slots = class.fields_slots();
+    unsafe { allocate_inner(ObjectKind::Instance { class }, slots) }
+}
+
+/// Safety: thread has to be registered with [`register_thread`] first.
+pub unsafe fn allocate_array(count: usize, size: NonZero<u16>) -> ObjectRef {
+    unsafe {
+        allocate_inner(
+            ObjectKind::Array { size: size },
+            count * size.get() as usize,
+        )
+    }
+}
+
+pub unsafe fn allocate_multiarray(
+    dimensions: usize,
+    mut count: impl Iterator<Item = usize>,
+    last_dim_o_size: NonZero<u16>,
+) -> Option<ObjectRef> {
+    let mut heap = HEAP.lock().expect("Failed to acquire lock on heap");
+
+    if SHOULD_STOP_THE_WORLD.load(Ordering::Relaxed) {
+        heap = stop_the_world_inner(heap);
+    }
+
+    let mut last_object: Option<Object> = None;
+    for i in 0..dimensions {
+        let len = count.next()?;
+
+        let size = if i == 0 {
+            last_dim_o_size
+        } else {
+            NonZero::<u16>::MIN
+        };
+        if len == 0 {
+            last_object = Some(Object::new_array(0, size));
+            continue;
+        }
+
+        let obj = Object::new_array(len, size);
+        if let Some(child) = last_object {
+            for i in 0..(obj.data.len().saturating_sub(1)) {
+                // Safety: no other thread is manipulating this object
+                unsafe {
+                    *obj.data[i].get() =
+                        JVMSlot::from_object(heap.allocate_from_object(child.clone_unchecked()));
+                }
+            }
+
+            if let Some(last) = obj.data.last() {
+                unsafe { *last.get() = JVMSlot::from_object(heap.allocate_from_object(child)) };
+            }
+        }
+        last_object = Some(obj);
+    }
+
+    last_object.map(|obj| heap.allocate_from_object(obj))
 }
 
 fn stop_the_world_inner(mut heap: MutexGuard<Heap>) -> MutexGuard<Heap> {
@@ -203,16 +265,20 @@ impl Heap {
         }
     }
 
-    pub fn allocate(&mut self, class: Arc<VMClass>) -> ObjectRef {
-        let data: Box<[UnsafeCell<JVMSlot>]> = (0..class.fields_slots())
+    pub fn allocate(&mut self, kind: ObjectKind, slots: usize) -> ObjectRef {
+        let data: Box<[UnsafeCell<JVMSlot>]> = (0..slots)
             .map(|_| UnsafeCell::new(JVMSlot::null()))
             .collect();
 
-        let arc_obj = Arc::new(Object {
+        self.allocate_from_object(Object {
             gc_refs: UnsafeCell::new(0),
             data,
-            class,
-        });
+            kind,
+        })
+    }
+
+    pub fn allocate_from_object(&mut self, object: Object) -> ObjectRef {
+        let arc_obj = Arc::new(object);
         self.objects.insert(ObjectRef(arc_obj.clone()));
         self.alloc_count += 1;
 
@@ -221,11 +287,56 @@ impl Heap {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum ObjectKind {
+    Instance { class: Arc<VMClass> },
+    Array { size: NonZero<u16> },
+}
 #[derive(Debug)]
 pub struct Object {
-    pub class: Arc<VMClass>,
     gc_refs: UnsafeCell<usize>,
+    pub kind: ObjectKind,
     pub data: Box<[UnsafeCell<JVMSlot>]>,
+}
+
+impl Object {
+    pub fn new_class(class: Arc<VMClass>) -> Self {
+        let data: Box<[UnsafeCell<JVMSlot>]> = (0..class.fields_slots())
+            .map(|_| UnsafeCell::new(JVMSlot::null()))
+            .collect();
+        Self {
+            gc_refs: UnsafeCell::new(0),
+            kind: ObjectKind::Instance { class },
+            data,
+        }
+    }
+
+    pub fn new_array(count: usize, size: NonZero<u16>) -> Self {
+        let len = count * size.get() as usize;
+        let data: Box<[UnsafeCell<JVMSlot>]> =
+            (0..len).map(|_| UnsafeCell::new(JVMSlot::null())).collect();
+
+        Self {
+            gc_refs: UnsafeCell::new(0),
+            kind: ObjectKind::Array { size },
+            data,
+        }
+    }
+
+    /// Clone an Object.
+    ///
+    /// User must be allowed to read data with race conditions in mind.
+    pub unsafe fn clone_unchecked(&self) -> Self {
+        Self {
+            gc_refs: UnsafeCell::new(0),
+            data: self
+                .data
+                .iter()
+                .map(|j| UnsafeCell::new(unsafe { &*j.get() }.clone()))
+                .collect(),
+            kind: self.kind.clone(),
+        }
+    }
 }
 
 unsafe impl Send for Object {}
