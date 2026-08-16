@@ -669,6 +669,12 @@ impl VM {
                             class
                                 .field_by_name(&*unresolved_name)
                                 .map(|f| (class.clone(), f.off()))
+                                .or_else(|| {
+                                    class.super_class().and_then(|supe| {
+                                        supe.field_by_name(&*unresolved_name)
+                                            .map(|f| (supe.clone(), f.off()))
+                                    })
+                                })
                                 .ok_or_else(|| {
                                     VMError::NoSuchFieldInClass(String::from(&**unresolved_name))
                                 })
