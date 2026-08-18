@@ -121,6 +121,54 @@ pub enum OpCode {
     /// Store reference into local variable.
     #[decode(short(base = 0x4b, count = 4))]
     AStore(u8) = 0x3a,
+    /// Load int from array
+    ///
+    /// The arrayref must be of type reference and must refer to an array whose components are of type int. The index must be of type int. Both arrayref and index are popped from the operand stack. The int value in the component of the array at index is retrieved and pushed onto the operand stack.
+    IALoad = 0x2e,
+    /// Load long from array
+    LALoad = 0x2f,
+    /// Store into long array
+    LAStore = 0x50,
+
+    /// Store into int array
+    ///
+    /// The arrayref must be of type reference and must refer to an array whose components are of type int. Both index and value must be of type int. The arrayref, index, and value are popped from the operand stack. The int value is stored as the component of the array indexed by index.
+    IAStore = 0x4f,
+
+    /// Load float from array
+    FALoad = 0x30,
+    /// Store into float array
+    FAStore = 0x51,
+
+    /// Load byte or boolean from array
+    ///
+    ///  The arrayref must be of type reference and must refer to an array whose components are of type byte or of type boolean. The index must be of type int. Both arrayref and index are popped from the operand stack. The byte value in the component of the array at index is retrieved, sign-extended to an int value, and pushed onto the top of the operand stack.
+    BALoad = 0x33,
+    /// Store into byte or boolean array
+    ///
+    ///  The arrayref must be of type reference and must refer to an array whose components are of type byte or of type boolean. The index and the value must both be of type int. The arrayref, index, and value are popped from the operand stack. The int value is truncated to a byte and stored as the component of the array indexed by index.
+    BAStore = 0x54,
+    /// Load char from array
+    ///
+    ///  The arrayref must be of type reference and must refer to an array whose components are of type char. The index must be of type int. Both arrayref and index are popped from the operand stack. The component of the array at index is retrieved and zero-extended to an int value. That value is pushed onto the operand stack.
+    CALoad = 0x34,
+    /// Store into char array
+    ///
+    ///  The arrayref must be of type reference and must refer to an array whose components are of type char. The index and the value must both be of type int. The arrayref, index, and value are popped from the operand stack. The int value is truncated to a char and stored as the component of the array indexed by index.
+    CAStore = 0x55,
+    /// Load double from array
+    DALoad = 0x31,
+    /// Store into double array
+    DAStore = 0x52,
+    /// Load short from array
+    SALoad = 0x35,
+    /// Store into short array
+    SAStore = 0x56,
+    /// Load reference from array
+    AALoad = 0x32,
+    /// Store into reference array
+    AAStore = 0x53,
+
     /// Push Byte. The immediate byte is sign-extended to an int value. That value is pushed onto the operand stack.
     #[decode(skip)]
     Bipush(i8) = 0x10,
@@ -416,6 +464,38 @@ pub enum OpCode {
     The unsigned indexbyte1 and indexbyte2 are used to construct an index into the run-time constant pool of the current class (§2.6), where the value of the index is (indexbyte1 << 8) | indexbyte2. The run-time constant pool item at the index must be a symbolic reference to a class or interface type. The named class or interface type is resolved (§5.4.3.1) and should result in a class type. Memory for a new instance of that class is allocated from the garbage-collected heap, and the instance variables of the new object are initialized to their default initial values (§2.3, §2.4). The objectref, a reference to the instance, is pushed onto the operand stack.
     */
     New(u16) = 0xbb,
+    /// Create new array
+    ///
+    ///
+    /// The count must be of type int. It is popped off the operand stack. The count represents the number of elements in the array to be created.
+    ///
+    /// The atype is a code that indicates the type of array to create. It must take one of the following values:
+    ///
+    /// | Array Type | atype |
+    /// |------------|-------|
+    /// | T_BOOLEAN	 | 4     |
+    /// | T_CHAR     | 5     |
+    /// | T_FLOAT 	 | 6     |
+    /// | T_DOUBLE 	 | 7     |
+    /// | T_BYTE     | 8     |
+    /// | T_SHORT 	 | 9     |
+    /// | T_INT 	 | 10    |
+    /// | T_LONG     | 11    |
+    NewArray(u8) = 0xbc,
+    /// Create new array of reference
+    /**
+    The count must be of type int. It is popped off the operand stack. The count represents the number of components of the array to be created. The unsigned indexbyte1 and indexbyte2 are used to construct an index into the run-time constant pool of the current class (§2.6), where the value of the index is (indexbyte1 << 8) | indexbyte2. The run-time constant pool item at that index must be a symbolic reference to a class, array, or interface type. The named class, array, or interface type is resolved (§5.4.3.1). A new array with components of that type, of length count, is allocated from the garbage-collected heap, and a reference arrayref to this new array object is pushed onto the operand stack. All components of the new array are initialized to null, the default value for reference types (§2.4).
+    */
+    ANewArray(u16) = 0xbd,
+    /// Get length of array
+    ArrayLength = 0xbe,
+    /// Create new multidimensional array
+    ///
+    /// The dimensions operand is an unsigned byte that must be greater than or equal to 1. It represents the number of dimensions of the array to be created. The operand stack must contain dimensions values. Each such value represents the number of components in a dimension of the array to be created, must be of type int, and must be non-negative. The count1 is the desired length in the first dimension, count2 in the second, etc.
+    ///
+    /// All of the count values are popped off the operand stack. The unsigned indexbyte1 and indexbyte2 are used to construct an index into the run-time constant pool of the current class (§2.6), where the value of the index is (indexbyte1 << 8) | indexbyte2. The run-time constant pool item at the index must be a symbolic reference to a class, array, or interface type. The named class, array, or interface type is resolved (§5.4.3.1). The resulting entry must be an array class type of dimensionality greater than or equal to dimensions.
+    /// A new multidimensional array of the array type is allocated from the garbage-collected heap. If any count value is zero, no subsequent dimensions are allocated. The components of the array in the first dimension are initialized to subarrays of the type of the second dimension, and so on. The components of the last allocated dimension of the array are initialized to the default initial value (§2.3, §2.4) for the element type of the array type. A reference arrayref to the new array is pushed onto the operand stack
+    MultiANewArray(u16, u8) = 0xc5,
 
     #[decode(wide(op = 0x15))]
     // The `wide` instruction (0xc4) modifies the behavior of another instruction so that it

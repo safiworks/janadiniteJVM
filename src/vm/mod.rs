@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     fs::File,
     mem::ManuallyDrop,
+    num::NonZero,
     ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Neg, Rem, Sub},
     path::PathBuf,
     sync::{Arc, RwLock},
@@ -10,7 +11,7 @@ use std::{
 mod class;
 pub(crate) mod heap;
 pub use class::*;
-use janadinite_parse::class::{Class, JVMAccessFlag, JVMCode, OpCode};
+use janadinite_parse::class::{Class, FieldDescriptor, JVMAccessFlag, JVMCode, OpCode};
 
 use crate::vm::heap::{ObjectKind, ObjectRef};
 
@@ -62,14 +63,17 @@ impl JVMSlot {
         Some(f(&*obj))
     }
 
+    #[inline(always)]
     pub const fn as_i32(&self) -> i32 {
         self.0.cast_unsigned() as i32
     }
 
+    #[inline(always)]
     pub const fn from_i32(i: i32) -> Self {
         Self((i as u32 as usize).cast_signed())
     }
 
+    #[inline(always)]
     pub const fn from_i64(i: i64) -> [Self; 2] {
         let i = i as u64;
 
@@ -161,6 +165,8 @@ pub enum VMError {
     NoSuchClass(String),
     Corrupted(String),
     NotAnObject,
+    NotAnArray,
+    IndexOutOfBounds(i32),
 }
 
 /// Describes the beginning of a stack frame in a method.
@@ -573,18 +579,86 @@ impl VM {
         }
     }
 
-    fn with_class_or_load_by_ref<R>(
+    fn get_class_or_load_by_ref<'c>(
         &self,
-        this_class: &VMClass,
+        this_class: &'c VMClass,
         ref_idx: u16,
-        f: impl FnOnce(&Arc<VMClass>) -> Result<R, VMError>,
-    ) -> Result<R, VMError> {
-        let name = this_class
+    ) -> Result<&'c Arc<VMClass>, VMError> {
+        match this_class
             .constant_pool()
             .get_class(ref_idx)
-            .ok_or(VMError::InvalidConstantPoolEntry(ref_idx))?;
+            .ok_or(VMError::InvalidConstantPoolEntry(ref_idx))?
+        {
+            Ok(class) => Ok(class),
+            Err((name, resolved)) => {
+                self.with_class_or_load_by_name(&*name, |c| Ok(resolved.get_or_init(|| c.clone())))
+            }
+        }
+    }
 
-        self.with_class_or_load_by_name(&*name, f)
+    fn get_class_or_array_by_ref<'c>(
+        &self,
+        this_class: &'c VMClass,
+        ref_idx: u16,
+    ) -> Result<ClassOrArrayBorrow<'c>, VMError> {
+        match this_class
+            .constant_pool()
+            .get_entry(ref_idx)
+            .ok_or(VMError::InvalidConstantPoolEntry(ref_idx))?
+        {
+            VMConstantPoolEntry::Class { name, resolved } => {
+                if let Some(class) = resolved.get() {
+                    return Ok(ClassOrArrayBorrow::Class(class));
+                }
+
+                let name = this_class
+                    .constant_pool()
+                    .get_utf8(*name)
+                    .expect("Class name doesn't point to UTF8");
+
+                self.with_class_or_load_by_name(&*name, |c| Ok(resolved.get_or_init(|| c.clone())))
+                    .map(ClassOrArrayBorrow::Class)
+            }
+            VMConstantPoolEntry::PrimitiveArray { dimensions, ty } => {
+                Ok(ClassOrArrayBorrow::PrimitiveArray {
+                    dimensions: *dimensions,
+                    ty: *ty,
+                })
+            }
+            VMConstantPoolEntry::ClassArray {
+                descriptor,
+                dimensions,
+                resolved_class,
+            } => {
+                if let Some(class) = resolved_class.get() {
+                    return Ok(ClassOrArrayBorrow::ClassArray {
+                        dimensions: *dimensions,
+                        class,
+                    });
+                }
+
+                let descriptor = this_class
+                    .constant_pool()
+                    .get_utf8(*descriptor)
+                    .expect("Array Class descriptor doesn't point to UTF8");
+
+                let name = FieldDescriptor::from_str(&*descriptor)
+                    .find_map(|desc| match desc {
+                        FieldDescriptor::Object(o) => Some(o),
+                        _ => None,
+                    })
+                    .expect("Array class descriptor is invalid");
+
+                self.with_class_or_load_by_name(&*name, |c| {
+                    Ok(resolved_class.get_or_init(|| c.clone()))
+                })
+                .map(|class| ClassOrArrayBorrow::ClassArray {
+                    dimensions: *dimensions,
+                    class,
+                })
+            }
+            _ => Err(VMError::InvalidConstantPoolEntry(ref_idx)),
+        }
     }
 
     fn get_method_or_resolve<'c>(
@@ -607,43 +681,36 @@ impl VM {
                 if let Some((class, method)) = resolved.get() {
                     Ok((class, *method))
                 } else {
-                    let unresolved_class = this_class
-                        .constant_pool()
-                        .get_class(*class)
-                        .expect("MethodRef points to invalid class");
                     let (unresolved_name, unresolved_descriptor) = this_class
                         .constant_pool()
                         .get_name_and_type(*name_and_desc)
                         .expect("MethodRef points to invalid NameAndType");
 
-                    let (class, method) =
-                        self.with_class_or_load_by_name(&*unresolved_class, |class| {
-                            let mut current_search_in = class;
-                            let mut found;
-                            loop {
-                                found = current_search_in
-                                    .method_by_name(
-                                        &*unresolved_name,
-                                        Some(&*unresolved_descriptor),
-                                    )
-                                    .map(|m| (current_search_in.clone(), m.id()));
+                    let root_class = self.get_class_or_load_by_ref(this_class, *class)?;
+                    let (class, method) = {
+                        let mut current_search_in = root_class;
+                        let mut found;
+                        loop {
+                            found = current_search_in
+                                .method_by_name(&*unresolved_name, Some(&*unresolved_descriptor))
+                                .map(|m| (current_search_in.clone(), m.id()));
 
-                                if found.is_some() {
-                                    break;
-                                }
-
-                                if let Some(supe) = current_search_in.super_class() {
-                                    current_search_in = supe;
-                                    continue;
-                                }
-
+                            if found.is_some() {
                                 break;
                             }
 
-                            found.ok_or_else(|| {
-                                VMError::NoSuchMethodInClass(String::from(&**unresolved_name))
-                            })
-                        })?;
+                            if let Some(supe) = current_search_in.super_class() {
+                                current_search_in = supe;
+                                continue;
+                            }
+
+                            break;
+                        }
+
+                        found.ok_or_else(|| {
+                            VMError::NoSuchMethodInClass(String::from(&**unresolved_name))
+                        })
+                    }?;
 
                     let (class, method) = resolved.get_or_init(|| (class, method));
                     Ok((class, *method))
@@ -674,40 +741,36 @@ impl VM {
                 if let Some((class, method)) = resolved.get() {
                     Ok((class, *method))
                 } else {
-                    let unresolved_class = this_class
-                        .constant_pool()
-                        .get_class(*class)
-                        .expect("MethodRef points to invalid class");
                     let (unresolved_name, _) = this_class
                         .constant_pool()
                         .get_name_and_type(*name_and_desc)
                         .expect("MethodRef points to invalid NameAndType");
 
-                    let (class, field) =
-                        self.with_class_or_load_by_name(&*unresolved_class, |class| {
-                            let mut current_search_in = class;
-                            let mut found;
-                            loop {
-                                found = current_search_in
-                                    .field_by_name(&*unresolved_name)
-                                    .map(|f| (current_search_in.clone(), f.off()));
+                    let root_class = self.get_class_or_load_by_ref(this_class, *class)?;
+                    let (class, field) = {
+                        let mut current_search_in = root_class;
+                        let mut found;
+                        loop {
+                            found = current_search_in
+                                .field_by_name(&*unresolved_name)
+                                .map(|f| (current_search_in.clone(), f.off()));
 
-                                if found.is_some() {
-                                    break;
-                                }
-
-                                if let Some(supe) = current_search_in.super_class() {
-                                    current_search_in = supe;
-                                    continue;
-                                }
-
+                            if found.is_some() {
                                 break;
                             }
 
-                            found.ok_or_else(|| {
-                                VMError::NoSuchFieldInClass(String::from(&**unresolved_name))
-                            })
-                        })?;
+                            if let Some(supe) = current_search_in.super_class() {
+                                current_search_in = supe;
+                                continue;
+                            }
+
+                            break;
+                        }
+
+                        found.ok_or_else(|| {
+                            VMError::NoSuchFieldInClass(String::from(&**unresolved_name))
+                        })
+                    }?;
 
                     let (class, field) = resolved.get_or_init(|| (class, field));
                     Ok((class, *field))
@@ -899,7 +962,7 @@ impl VM {
                         .as_static()
                         .ok_or_else(|| VMError::NotStatic(field.name().into()))?;
 
-                    for slot in static_data.iter().rev() {
+                    for slot in static_data {
                         // Safety: object access is not sync by default, statics are initialized once (?)
                         context.push_slot(unsafe { &*slot.get() }.clone());
                     }
@@ -911,7 +974,7 @@ impl VM {
                         .as_static()
                         .ok_or_else(|| VMError::NotStatic(field.name().into()))?;
 
-                    for slot in static_data {
+                    for slot in static_data.iter().rev() {
                         unsafe { *slot.get() = context.pop_slot().ok_or(VMError::StackUnderflow)? };
                     }
                 }
@@ -1165,11 +1228,132 @@ impl VM {
                 OpCode::LReturn => return_!(Long, lpop),
                 OpCode::FReturn => return_!(Float, fpop),
                 OpCode::DReturn => return_!(Double, dpop),
+                // TODO: byte pack arrays
+                OpCode::AALoad
+                | OpCode::BALoad
+                | OpCode::CALoad
+                | OpCode::IALoad
+                | OpCode::FALoad
+                | OpCode::SALoad => {
+                    let index = context.ipop()?;
+                    let reference = context.apop()?;
+
+                    context.push_slot(unsafe {
+                        (*reference
+                            .data
+                            .get(index as usize)
+                            .ok_or(VMError::IndexOutOfBounds(index))?
+                            .get())
+                        .clone()
+                    });
+                }
+                OpCode::AAStore => {
+                    let value = context.apop()?;
+                    let index = context.ipop()?;
+                    let reference = context.apop()?;
+
+                    unsafe {
+                        *reference
+                            .data
+                            .get(index as usize)
+                            .ok_or(VMError::IndexOutOfBounds(index))?
+                            .get() = JVMSlot::from_object(value)
+                    };
+                }
+                OpCode::BAStore
+                | OpCode::IAStore
+                | OpCode::CAStore
+                | OpCode::SAStore
+                | OpCode::FAStore => {
+                    let value = context.pop_slot().ok_or(VMError::StackUnderflow)?;
+                    let index = context.ipop()?;
+                    let reference = context.apop()?;
+
+                    unsafe {
+                        *reference
+                            .data
+                            .get(index as usize)
+                            .ok_or(VMError::IndexOutOfBounds(index))?
+                            .get() = value;
+                    }
+                }
+                OpCode::DALoad | OpCode::LALoad => {
+                    let index = context.ipop()? * 2;
+                    let reference = context.apop()?;
+
+                    if reference.data.len() <= index as usize + 1 {
+                        return Err(VMError::IndexOutOfBounds(index));
+                    }
+
+                    context.push_slot(unsafe { (*reference.data[index as usize].get()).clone() });
+                    context
+                        .push_slot(unsafe { (*reference.data[index as usize + 1].get()).clone() });
+                }
+                OpCode::LAStore | OpCode::DAStore => {
+                    let value = context.lpop()?;
+                    let index = context.ipop()? * 2;
+                    let reference = context.apop()?;
+
+                    let slots = JVMSlot::from_i64(value);
+
+                    if reference.data.len() <= index as usize + 1 {
+                        return Err(VMError::IndexOutOfBounds(index));
+                    }
+                    unsafe { *reference.data[index as usize].get() = slots[0].clone() };
+                    unsafe { *reference.data[index as usize + 1].get() = slots[1].clone() };
+                }
+                OpCode::ArrayLength => {
+                    let reference = context.apop()?;
+
+                    let ObjectKind::Array { size } = reference.kind else {
+                        return Err(VMError::NotAnArray);
+                    };
+
+                    context.ipush((reference.data.len() / size.get() as usize) as i32);
+                }
                 OpCode::New(class_ref) => {
-                    let new_class =
-                        self.with_class_or_load_by_ref(class, class_ref, |c| Ok(c.clone()))?;
+                    let new_class = self.get_class_or_load_by_ref(class, class_ref)?;
                     // Safety: Thread was already registered before this call.
-                    let instance = unsafe { heap::allocate(new_class) };
+                    let instance = unsafe { heap::allocate(new_class.clone()) };
+                    context.push_slot(JVMSlot::from_object(instance));
+                }
+                OpCode::NewArray(t) => {
+                    let prim = PrimitiveArrayType::from_raw(t).expect("Invalid array type");
+                    let slot_count = prim.slot_count();
+                    let len = context.ipop()?;
+
+                    let instance = unsafe { heap::allocate_array(len as usize, slot_count) };
+                    context.push_slot(JVMSlot::from_object(instance));
+                }
+                OpCode::ANewArray(ref_idx) => {
+                    let _class_or_array = self.get_class_or_array_by_ref(class, ref_idx)?;
+                    let len = context.ipop()?;
+
+                    let instance =
+                        unsafe { heap::allocate_array(len as usize, NonZero::<u16>::MIN) };
+                    context.push_slot(JVMSlot::from_object(instance));
+                }
+                OpCode::MultiANewArray(ref_idx, dim) => {
+                    if dim == 0 {
+                        return Err(VMError::Corrupted(format!(
+                            "invalid instruction multianewarray {ref_idx} {dim}: dimensions is zero"
+                        )));
+                    }
+
+                    let class_or_array = self.get_class_or_array_by_ref(class, ref_idx)?;
+                    let slot_count = match class_or_array {
+                        ClassOrArrayBorrow::Class(_) => NonZero::<u16>::MIN,
+                        ClassOrArrayBorrow::ClassArray { .. } => NonZero::<u16>::MIN,
+                        ClassOrArrayBorrow::PrimitiveArray { ty, .. } => ty.slot_count(),
+                    };
+
+                    let instance = unsafe {
+                        heap::allocate_multiarray(
+                            dim as usize,
+                            (0..dim as usize).map(|_| context.ipop()),
+                            slot_count,
+                        )?
+                    };
                     context.push_slot(JVMSlot::from_object(instance));
                 }
                 OpCode::Dup => context.dup(),

@@ -1,13 +1,18 @@
 use std::{
     cell::UnsafeCell,
     fmt::Debug,
+    num::NonZero,
     ops::Deref,
     sync::{Arc, OnceLock},
 };
 
 use janadinite_parse::{
     self as raw,
-    class::{self, Class, ConstantPoolEntry, JVMAccessFlag, JVMCode, JVMField, JVMMethod},
+    class::{
+        self, Class, ConstantPoolEntry, FieldDescriptor, JVMAccessFlag, JVMCode, JVMField,
+        JVMMethod,
+    },
+    invalid_data,
 };
 
 use crate::vm::JVMSlot;
@@ -23,7 +28,20 @@ pub enum MethodID {
 #[repr(align(32))]
 pub enum VMConstantPoolEntry {
     UTF8(Arc<str>),
-    Class(Arc<str>),
+    Class {
+        name: u16,
+        resolved: OnceLock<Arc<VMClass>>,
+    },
+    PrimitiveArray {
+        dimensions: NonZero<u16>,
+        ty: PrimitiveArrayType,
+    },
+    ResolvedClassArray(NonZero<u16>),
+    ClassArray {
+        descriptor: u16,
+        dimensions: NonZero<u16>,
+        resolved_class: OnceLock<Arc<VMClass>>,
+    },
     NameAndType {
         name: u16,
         descriptor: u16,
@@ -52,7 +70,26 @@ impl Debug for VMConstantPoolEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             VMConstantPoolEntry::UTF8(s) => write!(f, "UTF8({})", s),
-            VMConstantPoolEntry::Class(name) => write!(f, "Class({name})"),
+            VMConstantPoolEntry::Class { name, .. } => write!(f, "Class({name})"),
+            VMConstantPoolEntry::PrimitiveArray { dimensions, ty } => {
+                write!(
+                    f,
+                    "PrimitiveArray {{ dimensions: {dimensions}, ty: {ty:?} }}"
+                )
+            }
+            VMConstantPoolEntry::ClassArray {
+                dimensions,
+                descriptor,
+                ..
+            } => {
+                write!(
+                    f,
+                    "ClassArray {{ dimensions: {dimensions}, descriptor: {descriptor} }}"
+                )
+            }
+            VMConstantPoolEntry::ResolvedClassArray(dimensions) => {
+                write!(f, "ResolvedClassArray({dimensions})")
+            }
             VMConstantPoolEntry::NameAndType { name, descriptor } => {
                 write!(f, "NameAndType({name}, {descriptor})")
             }
@@ -84,6 +121,14 @@ pub struct VMConstantPool {
 }
 
 impl VMConstantPool {
+    pub fn get_utf8(&self, index: u16) -> Option<&Arc<str>> {
+        let VMConstantPoolEntry::UTF8(name) = self.get_entry(index)? else {
+            return None;
+        };
+
+        Some(name)
+    }
+
     pub fn get_name_and_type(&self, index: u16) -> Option<(&Arc<str>, &Arc<str>)> {
         match self.get_entry(index)? {
             VMConstantPoolEntry::NameAndType { name, descriptor } => {
@@ -107,9 +152,23 @@ impl VMConstantPool {
         }
     }
 
-    pub fn get_class(&self, index: u16) -> Option<&Arc<str>> {
+    #[inline(always)]
+    pub fn get_class(
+        &self,
+        index: u16,
+    ) -> Option<Result<&Arc<VMClass>, (&Arc<str>, &OnceLock<Arc<VMClass>>)>> {
         match self.get_entry(index)? {
-            VMConstantPoolEntry::Class(name) => Some(name),
+            VMConstantPoolEntry::Class { name, resolved } => {
+                if let Some(resolved) = resolved.get() {
+                    return Some(Ok(resolved));
+                }
+
+                let name = self
+                    .get_utf8(*name)
+                    .expect("Class name should be valid UTF8");
+
+                Some(Err((name, resolved)))
+            }
             _ => None,
         }
     }
@@ -143,7 +202,57 @@ impl VMConstantPool {
                 ConstantPoolEntry::Class { name_index } => {
                     let name = class::get_const!(UTF8 entries, *name_index, "Class class name");
 
-                    VMConstantPoolEntry::Class(name.clone())
+                    if name.starts_with("[") {
+                        let descriptor = FieldDescriptor::from_str(&name[1..]);
+                        let mut dimensions = NonZero::<u16>::MIN;
+                        let mut returns = None;
+
+                        for ty in descriptor {
+                            match ty {
+                                FieldDescriptor::Array => dimensions = dimensions.saturating_add(1),
+                                FieldDescriptor::Object(o) => {
+                                    returns = Some(if o == this_name {
+                                        VMConstantPoolEntry::ResolvedClassArray(dimensions)
+                                    } else {
+                                        VMConstantPoolEntry::ClassArray {
+                                            descriptor: *name_index,
+                                            dimensions,
+                                            resolved_class: OnceLock::new(),
+                                        }
+                                    });
+                                    break;
+                                }
+                                o => {
+                                    let prime = match o {
+                                        FieldDescriptor::Array | FieldDescriptor::Object(_) => {
+                                            unreachable!()
+                                        }
+                                        FieldDescriptor::Bool => PrimitiveArrayType::Bool,
+                                        FieldDescriptor::Byte => PrimitiveArrayType::Byte,
+                                        FieldDescriptor::Char => PrimitiveArrayType::Char,
+                                        FieldDescriptor::Float => PrimitiveArrayType::Float,
+                                        FieldDescriptor::Double => PrimitiveArrayType::Double,
+                                        FieldDescriptor::Short => PrimitiveArrayType::Short,
+                                        FieldDescriptor::Int => PrimitiveArrayType::Int,
+                                        FieldDescriptor::Long => PrimitiveArrayType::Long,
+                                    };
+
+                                    returns = Some(VMConstantPoolEntry::PrimitiveArray {
+                                        dimensions,
+                                        ty: prime,
+                                    });
+                                    break;
+                                }
+                            }
+                        }
+
+                        returns.ok_or(invalid_data!("Array class invalid"))?
+                    } else {
+                        VMConstantPoolEntry::Class {
+                            name: *name_index,
+                            resolved: OnceLock::new(),
+                        }
+                    }
                 }
                 ConstantPoolEntry::Integer { bytes } => VMConstantPoolEntry::Int(*bytes as i32),
                 ConstantPoolEntry::Float { value } => VMConstantPoolEntry::Float(*value),
@@ -298,6 +407,55 @@ impl VMMethod {
             MethodID::Vtable(self.idx)
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PrimitiveArrayType {
+    Bool,
+    Char,
+    Float,
+    Double,
+    Byte,
+    Short,
+
+    Int,
+    Long,
+}
+
+impl PrimitiveArrayType {
+    pub const fn slot_count(&self) -> NonZero<u16> {
+        match self {
+            Self::Double | Self::Long => const { NonZero::new(2).unwrap() },
+            _ => NonZero::<u16>::MIN,
+        }
+    }
+
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            4 => Some(PrimitiveArrayType::Bool),
+            5 => Some(PrimitiveArrayType::Char),
+            6 => Some(PrimitiveArrayType::Float),
+            7 => Some(PrimitiveArrayType::Double),
+            8 => Some(PrimitiveArrayType::Byte),
+            9 => Some(PrimitiveArrayType::Short),
+            10 => Some(PrimitiveArrayType::Int),
+            11 => Some(PrimitiveArrayType::Long),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ClassOrArrayBorrow<'a> {
+    Class(&'a Arc<VMClass>),
+    PrimitiveArray {
+        dimensions: NonZero<u16>,
+        ty: PrimitiveArrayType,
+    },
+    ClassArray {
+        dimensions: NonZero<u16>,
+        class: &'a Arc<VMClass>,
+    },
 }
 
 #[derive(Debug)]

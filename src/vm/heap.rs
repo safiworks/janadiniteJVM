@@ -13,7 +13,7 @@ use std::{
 
 use rustc_hash::FxBuildHasher;
 
-use crate::vm::{JVMSlot, VMClass};
+use crate::vm::{JVMSlot, VMClass, VMError};
 
 const GC_THRESHOLD: usize = 20;
 
@@ -88,9 +88,9 @@ pub unsafe fn allocate_array(count: usize, size: NonZero<u16>) -> ObjectRef {
 
 pub unsafe fn allocate_multiarray(
     dimensions: usize,
-    mut count: impl Iterator<Item = usize>,
+    mut count: impl Iterator<Item = Result<i32, VMError>>,
     last_dim_o_size: NonZero<u16>,
-) -> Option<ObjectRef> {
+) -> Result<ObjectRef, VMError> {
     let mut heap = HEAP.lock().expect("Failed to acquire lock on heap");
 
     if SHOULD_STOP_THE_WORLD.load(Ordering::Relaxed) {
@@ -99,7 +99,7 @@ pub unsafe fn allocate_multiarray(
 
     let mut last_object: Option<Object> = None;
     for i in 0..dimensions {
-        let len = count.next()?;
+        let len = count.next().unwrap()?;
 
         let size = if i == 0 {
             last_dim_o_size
@@ -111,7 +111,7 @@ pub unsafe fn allocate_multiarray(
             continue;
         }
 
-        let obj = Object::new_array(len, size);
+        let obj = Object::new_array(len as usize, size);
         if let Some(child) = last_object {
             for i in 0..(obj.data.len().saturating_sub(1)) {
                 // Safety: no other thread is manipulating this object
@@ -128,7 +128,9 @@ pub unsafe fn allocate_multiarray(
         last_object = Some(obj);
     }
 
-    last_object.map(|obj| heap.allocate_from_object(obj))
+    last_object
+        .map(|obj| heap.allocate_from_object(obj))
+        .ok_or_else(|| VMError::Corrupted("allocate array with dimensions=0".into()))
 }
 
 fn stop_the_world_inner(mut heap: MutexGuard<Heap>) -> MutexGuard<Heap> {
