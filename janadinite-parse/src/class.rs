@@ -393,6 +393,14 @@ pub enum OpCode {
     ///
     /// if_icmpne succeeds if and only if value1 != value2
     IfIcmpNe(i16) = 0xa0,
+    /// if_icmplt succeeds if and only if value1 < value2
+    IfIcmpLt(i16) = 0xa1,
+    /// if_icmpge succeeds if and only if value1 ≥ value2
+    IfIcmpGe(i16) = 0xa2,
+    /// if_icmpgt succeeds if and only if value1 > value2
+    IfIcmpGt(i16) = 0xa3,
+    /// if_icmple succeeds if and only if value1 ≤ value2
+    IfIcmpLe(i16) = 0xa4,
     /// Compare long
     ///
     ///  Both value1 and value2 must be of type long. They are both popped from the operand stack, and a signed integer comparison is performed. If value1 is greater than value2, the int value 1 is pushed onto the operand stack. If value1 is equal to value2, the int value 0 is pushed onto the operand stack. If value1 is less than value2, the int value -1 is pushed onto the operand stack.

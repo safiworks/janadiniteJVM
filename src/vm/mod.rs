@@ -1192,19 +1192,27 @@ impl VM {
                 OpCode::Goto(off) => {
                     instr.set_pc(last_pc.saturating_add_signed(off));
                 }
-                OpCode::IfIcmpEq(off) | OpCode::IfIcmpNe(off) => {
+                OpCode::IfIcmpEq(off)
+                | OpCode::IfIcmpNe(off)
+                | OpCode::IfIcmpGe(off)
+                | OpCode::IfIcmpLe(off)
+                | OpCode::IfIcmpLt(off)
+                | OpCode::IfIcmpGt(off) => {
                     let v2 = context.ipop()?;
                     let v1 = context.ipop()?;
 
-                    match (v1.cmp(&v2), opcode) {
-                        (std::cmp::Ordering::Equal, OpCode::IfIcmpEq(_))
-                        | (
-                            std::cmp::Ordering::Greater | std::cmp::Ordering::Less,
-                            OpCode::IfIcmpNe(_),
-                        ) => {
-                            instr.set_pc(last_pc.saturating_add_signed(off));
-                        }
-                        _ => {}
+                    let is_true = match opcode {
+                        OpCode::IfIcmpEq(_) => v1 == v2,
+                        OpCode::IfIcmpNe(_) => v1 != v2,
+                        OpCode::IfIcmpGe(_) => v1 >= v2,
+                        OpCode::IfIcmpLe(_) => v1 <= v2,
+                        OpCode::IfIcmpGt(_) => v1 > v2,
+                        OpCode::IfIcmpLt(_) => v1 < v2,
+                        _ => unreachable!(),
+                    };
+
+                    if is_true {
+                        instr.set_pc(last_pc.saturating_add_signed(off));
                     }
                 }
                 OpCode::IfNe(off) | OpCode::IfEq(off) => {

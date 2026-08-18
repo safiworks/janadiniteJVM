@@ -1,6 +1,7 @@
 use std::{
     cell::UnsafeCell,
     collections::HashSet,
+    fmt::Debug,
     hash::Hash,
     mem::ManuallyDrop,
     num::NonZero,
@@ -294,7 +295,6 @@ pub enum ObjectKind {
     Instance { class: Arc<VMClass> },
     Array { size: NonZero<u16> },
 }
-#[derive(Debug)]
 pub struct Object {
     gc_refs: UnsafeCell<usize>,
     pub kind: ObjectKind,
@@ -343,6 +343,29 @@ impl Object {
 
 unsafe impl Send for Object {}
 unsafe impl Sync for Object {}
+
+impl Debug for Object {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        struct DebugData<'a> {
+            data: &'a [UnsafeCell<JVMSlot>],
+        }
+
+        impl Debug for DebugData<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let mut list = f.debug_list();
+
+                for d in self.data {
+                    list.entry(unsafe { &*d.get() });
+                }
+                list.finish()
+            }
+        }
+        f.debug_struct("Object")
+            .field("kind", &self.kind)
+            .field("unchecked_data", &DebugData { data: &self.data })
+            .finish()
+    }
+}
 
 /// A pointer to an [`Object`].
 ///
